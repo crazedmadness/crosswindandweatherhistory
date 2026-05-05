@@ -938,21 +938,113 @@ def render_history_time_badge(hour_offset, timezone_name="America/Los_Angeles"):
     """
 
 
-def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Angeles", phone=False, key_prefix="timeline", active=False):
-    """Render a custom JS timeline scrubber with a fixed center marker.
 
-    The timeline slides behind the center marker. It updates Streamlit by
-    changing only the history_hour query param. History on/off is controlled
-    by a real Streamlit toggle outside the iframe so it cannot get stuck.
-    """
+def ensure_xwind_timeline_component():
+    # Create a tiny local Streamlit component for the custom timeline.
+    component_dir = Path(__file__).parent / "_xwind_timeline_component"
+    component_dir.mkdir(exist_ok=True)
+    index_file = component_dir / "index.html"
+
+    component_html = '''<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        :root { --teal:#12d6cb; --teal-mid:rgba(18,214,203,.42); --text:#e9fffd; --muted:#92a8a7; }
+        * { box-sizing:border-box; }
+        body { margin:0; background:transparent; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif; overflow:hidden; color:var(--text); }
+        .shell { position:relative; height:118px; border:1px solid var(--teal-mid); border-radius:16px; background:radial-gradient(circle at 50% 0%, rgba(18,214,203,.20), transparent 42%), linear-gradient(135deg, rgba(18,214,203,.11), rgba(255,255,255,.025)); box-shadow:0 0 0 1px rgba(255,255,255,.035) inset, 0 8px 24px rgba(0,0,0,.22); overflow:hidden; user-select:none; touch-action:pan-y; }
+        .shell.phone { height:104px; border-radius:14px; }
+        .shell.off { filter: grayscale(1); opacity:.62; border-color:rgba(255,255,255,.16); background:linear-gradient(135deg, rgba(255,255,255,.055), rgba(255,255,255,.018)); box-shadow:0 0 0 1px rgba(255,255,255,.025) inset, 0 8px 20px rgba(0,0,0,.16); }
+        .shell.off .viewport { cursor:not-allowed; }
+        .shell.off .chip { opacity:.35; }
+        .shell.off .marker:before, .shell.off .marker:after { background:rgba(255,255,255,.35); box-shadow:none; }
+        .inside-toggle { position:absolute; left:10px; top:7px; z-index:10; height:20px; display:flex; align-items:center; gap:5px; border:1px solid rgba(18,214,203,.48); background:rgba(18,214,203,.14); color:#dffffd; border-radius:999px; padding:2px 7px 2px 4px; font-size:9px; font-weight:950; letter-spacing:.25px; cursor:default; pointer-events:none; box-shadow:0 0 14px rgba(18,214,203,.18); }
+        .inside-toggle .knob { width:14px; height:14px; border-radius:50%; background:var(--teal); box-shadow:0 0 14px rgba(18,214,203,.72); }
+        .inside-toggle.off { background:rgba(255,255,255,.055); border-color:rgba(255,255,255,.16); color:#b9c9c8; box-shadow:none; }
+        .inside-toggle.off .knob { background:rgba(255,255,255,.28); box-shadow:none; }
+        .top { height:31px; display:flex; align-items:center; justify-content:center; gap:8px; font-size:11px; color:#dffffd; padding-top:3px; padding-left:58px; padding-right:58px; }
+        .pill { background:var(--teal); color:#041615; border-radius:999px; font-weight:950; letter-spacing:.35px; padding:2px 8px; min-width:48px; text-align:center; box-shadow:0 0 18px rgba(18,214,203,.38); }
+        .timebits { display:flex; gap:10px; white-space:nowrap; font-weight:750; }
+        .timebits b { color:#8df7f1; }
+        .viewport { position:absolute; left:0; right:0; top:31px; bottom:18px; overflow:hidden; cursor:grab; }
+        .viewport.dragging { cursor:grabbing; }
+        .rail { position:absolute; top:18px; height:42px; display:flex; align-items:center; will-change:transform; transition:transform 520ms cubic-bezier(.17, .89, .28, 1.22); }
+        .viewport.dragging .rail { transition:none; }
+        .chip { flex:0 0 auto; width:68px; height:42px; margin:0 4px; border-radius:12px; border:1px solid rgba(255,255,255,.12); background:rgba(255,255,255,.045); display:flex; flex-direction:column; align-items:center; justify-content:center; color:#cfd8d8; transform:scale(.88); opacity:.58; transition:transform 420ms cubic-bezier(.17,.89,.28,1.22), opacity 220ms ease, background 220ms ease, border-color 220ms ease, box-shadow 220ms ease; }
+        .chip.active { transform:scale(1.16); opacity:1; color:#ffffff; background:rgba(18,214,203,.18); border-color:var(--teal); box-shadow:0 0 0 1px rgba(18,214,203,.20) inset, 0 0 22px rgba(18,214,203,.28); }
+        .chip .age { font-size:13px; font-weight:950; line-height:14px; letter-spacing:.3px; }
+        .chip .utc { font-size:9px; color:#86f3ee; line-height:11px; font-weight:850; }
+        .marker { position:absolute; left:50%; top:31px; bottom:14px; width:0; pointer-events:none; z-index:5; }
+        .marker:before { content:""; position:absolute; top:0; bottom:0; left:-1px; width:2px; background:var(--teal); box-shadow:0 0 18px rgba(18,214,203,.9); border-radius:99px; }
+        .marker:after { content:""; position:absolute; top:-3px; left:-8px; width:16px; height:16px; background:var(--teal); transform:rotate(45deg); border-radius:4px; box-shadow:0 0 20px rgba(18,214,203,.75); }
+        .glow { position:absolute; left:50%; top:31px; bottom:18px; width:100px; transform:translateX(-50%); background:linear-gradient(90deg, transparent, rgba(18,214,203,.12), transparent); pointer-events:none; z-index:2; }
+        .bottom { position:absolute; left:12px; right:12px; bottom:4px; display:flex; justify-content:space-between; color:var(--muted); font-size:9.5px; font-weight:850; }
+        .hint { position:absolute; right:12px; top:8px; color:#6deee8; font-size:9px; font-weight:850; opacity:.65; }
+        .shell.phone .inside-toggle { left:7px; top:7px; font-size:8px; padding-right:6px; }
+        .shell.phone .inside-toggle .knob { width:13px; height:13px; }
+        .shell.phone .top { font-size:9.2px; gap:5px; padding-left:52px; padding-right:5px; justify-content:flex-start; }
+        .shell.phone .timebits { gap:6px; }
+        .shell.phone .chip { width:56px; margin:0 3px; }
+        .shell.phone .chip .age { font-size:11.5px; }
+        .shell.phone .chip .utc { font-size:8px; }
+        .shell.phone .hint { display:none; }
+    </style>
+</head>
+<body>
+    <div class="shell" id="shell">
+        <button class="inside-toggle" id="insideToggle" title="24 hour history status"><span class="knob"></span><span>24h</span></button>
+        <div class="top"><span class="pill" id="agePill">NOW</span><span class="timebits"><span><b>UTC</b> <span id="utcLabel"></span></span><span><b>LOCAL</b> <span id="localLabel"></span></span></span></div>
+        <div class="hint">drag / wheel</div>
+        <div class="viewport" id="viewport"><div class="rail" id="rail"></div></div>
+        <div class="glow"></div><div class="marker"></div>
+        <div class="bottom"><span>23h ago</span><span>fixed marker</span><span>current</span></div>
+    </div>
+<script>
+let labels=[], selectedOffset=0, historyActive=false, phone=false, chipW=76, lastSentOffset=null;
+const rail=document.getElementById("rail"), viewport=document.getElementById("viewport"), agePill=document.getElementById("agePill"), utcLabel=document.getElementById("utcLabel"), localLabel=document.getElementById("localLabel"), insideToggle=document.getElementById("insideToggle"), shell=document.getElementById("shell");
+function send(type,data){ window.parent.postMessage(Object.assign({isStreamlitMessage:true,type:type},data),"*"); }
+function setFrameHeight(height){ send("streamlit:setFrameHeight",{height:height}); }
+function setComponentValue(value){ lastSentOffset=Number(value); send("streamlit:setComponentValue",{value:Number(value)}); }
+function componentReady(){ send("streamlit:componentReady",{apiVersion:1}); }
+function selectedIndexFromOffset(offset){ return labels.findIndex(x=>Number(x.offset)===Number(offset)); }
+function offsetFromIndex(index){ index=Math.max(0,Math.min(labels.length-1,index)); return Number(labels[index].offset); }
+function rebuildChips(){ rail.innerHTML=""; labels.forEach(item=>{ const div=document.createElement("div"); div.className="chip"; div.dataset.offset=item.offset; div.innerHTML=`<div class="age">${item.age}</div><div class="utc">${item.utc}</div>`; div.addEventListener("click",()=>selectOffset(item.offset,true)); rail.appendChild(div); }); }
+function updateLabels(){ const item=labels.find(x=>Number(x.offset)===Number(selectedOffset))||labels[labels.length-1]; if(!item)return; agePill.textContent=item.offset===0?"CURRENT":`${item.offset}H AGO`; utcLabel.textContent=item.utc; localLabel.textContent=item.local; insideToggle.classList.toggle("off",!historyActive); shell.classList.toggle("off",!historyActive); shell.classList.toggle("phone",phone); [...rail.children].forEach(chip=>chip.classList.toggle("active",Number(chip.dataset.offset)===Number(selectedOffset))); }
+function centerSelected(animate=true){ if(!labels.length)return; const idx=selectedIndexFromOffset(selectedOffset); const safeIdx=idx<0?labels.length-1:idx; const vw=viewport.clientWidth; const x=(vw/2)-(safeIdx*chipW)-(chipW/2); rail.style.transition=animate?"transform 520ms cubic-bezier(.17,.89,.28,1.22)":"none"; rail.style.transform=`translateX(${x}px)`; updateLabels(); }
+function commitSelected(){ if(!historyActive)return; if(Number(selectedOffset)===Number(lastSentOffset))return; try{ window.parent.sessionStorage.setItem("xwind_scroll_y",String(window.parent.scrollY||0)); }catch(err){} setComponentValue(selectedOffset); }
+function selectOffset(offset,commit=false){ if(!historyActive)return; selectedOffset=Math.max(0,Math.min(23,Number(offset))); centerSelected(true); if(commit)commitSelected(); }
+let startX=0,startIdx=0,dragging=false,moved=false;
+function clientX(e){ if(e.touches&&e.touches.length)return e.touches[0].clientX; return e.clientX; }
+function startDrag(e){ if(!historyActive)return; dragging=true; moved=false; viewport.classList.add("dragging"); startX=clientX(e); startIdx=selectedIndexFromOffset(selectedOffset); }
+function moveDrag(e){ if(!dragging)return; const dx=clientX(e)-startX; if(Math.abs(dx)>3)moved=true; const idxFloat=startIdx-(dx/chipW); const idx=Math.max(0,Math.min(labels.length-1,idxFloat)); const vw=viewport.clientWidth; const x=(vw/2)-(idx*chipW)-(chipW/2); rail.style.transition="none"; rail.style.transform=`translateX(${x}px)`; selectedOffset=offsetFromIndex(Math.round(idx)); updateLabels(); e.preventDefault(); }
+function endDrag(){ if(!dragging)return; dragging=false; viewport.classList.remove("dragging"); centerSelected(true); if(moved)commitSelected(); }
+viewport.addEventListener("mousedown",startDrag); window.addEventListener("mousemove",moveDrag); window.addEventListener("mouseup",endDrag);
+viewport.addEventListener("touchstart",startDrag,{passive:false}); viewport.addEventListener("touchmove",moveDrag,{passive:false}); viewport.addEventListener("touchend",endDrag); viewport.addEventListener("touchcancel",endDrag); window.addEventListener("blur",()=>{if(dragging)endDrag();});
+viewport.addEventListener("wheel",e=>{ e.preventDefault(); if(!historyActive)return; const direction=Math.sign(e.deltaY||e.deltaX); const idx=selectedIndexFromOffset(selectedOffset); const nextIdx=Math.max(0,Math.min(labels.length-1,idx+direction)); selectOffset(offsetFromIndex(nextIdx),true); },{passive:false});
+window.addEventListener("message",event=>{ if(!event.data||event.data.type!=="streamlit:render")return; const args=event.data.args||{}; labels=args.labels||[]; selectedOffset=Number(args.selected_offset||0); historyActive=!!args.active; phone=!!args.phone; chipW=phone?62:76; lastSentOffset=Number(args.selected_offset||0); rebuildChips(); centerSelected(false); setFrameHeight(Number(args.height||(phone?104:118))); });
+componentReady(); setFrameHeight(118);
+</script>
+</body>
+</html>'''
+    index_file.write_text(component_html, encoding="utf-8")
+    return components.declare_component("xwind_history_timeline", path=str(component_dir))
+
+
+@st.cache_resource
+def get_xwind_timeline_component():
+    return ensure_xwind_timeline_component()
+
+
+def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Angeles", phone=False, key_prefix="timeline", active=False):
+    # Render the custom timeline as a real Streamlit component and return selected hour.
     try:
         hour_offset = int(hour_offset)
     except Exception:
         hour_offset = 0
-
     hour_offset = max(0, min(23, hour_offset))
     now_utc = pd.Timestamp.now(tz="UTC").floor("h")
-
     labels = []
     for h in range(23, -1, -1):
         ts_utc = now_utc - pd.Timedelta(hours=h)
@@ -960,520 +1052,27 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
             ts_local = ts_utc.tz_convert(ZoneInfo(timezone_name))
         except Exception:
             ts_local = ts_utc.tz_convert(ZoneInfo("America/Los_Angeles"))
-
-        age = "NOW" if h == 0 else f"-{h}h"
-        labels.append({
-            "offset": h,
-            "age": age,
-            "utc": ts_utc.strftime("%H:%MZ"),
-            "local": ts_local.strftime("%H:%M %Z"),
-        })
-
-    import json
-    payload = json.dumps(labels)
-    selected_json = json.dumps(hour_offset)
-    active_json = json.dumps(bool(active))
-    height = 112 if phone else 118
-
-    components.html(
-        f"""
-        <!doctype html>
-        <html>
-        <head>
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <style>
-                :root {{
-                    --teal:#12d6cb;
-                    --teal-soft:rgba(18,214,203,.16);
-                    --teal-mid:rgba(18,214,203,.42);
-                    --bg:rgba(255,255,255,.035);
-                    --line:rgba(255,255,255,.12);
-                    --text:#e9fffd;
-                    --muted:#92a8a7;
-                }}
-                * {{ box-sizing:border-box; }}
-                body {{
-                    margin:0;
-                    background:transparent;
-                    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
-                    overflow:hidden;
-                    color:var(--text);
-                }}
-                .shell {{
-                    position:relative;
-                    height:{height}px;
-                    border:1px solid var(--teal-mid);
-                    border-radius:16px;
-                    background:
-                        radial-gradient(circle at 50% 0%, rgba(18,214,203,.20), transparent 42%),
-                        linear-gradient(135deg, rgba(18,214,203,.11), rgba(255,255,255,.025));
-                    box-shadow:0 0 0 1px rgba(255,255,255,.035) inset, 0 8px 24px rgba(0,0,0,.22);
-                    overflow:hidden;
-                    user-select:none;
-                    touch-action:pan-y;
-                }}
-                .shell.off {{
-                    filter: grayscale(1);
-                    opacity:.62;
-                    border-color:rgba(255,255,255,.16);
-                    background:linear-gradient(135deg, rgba(255,255,255,.055), rgba(255,255,255,.018));
-                    box-shadow:0 0 0 1px rgba(255,255,255,.025) inset, 0 8px 20px rgba(0,0,0,.16);
-                }}
-                .shell.off .viewport {{ cursor:not-allowed; }}
-                .shell.off .chip {{ opacity:.35; }}
-                .shell.off .marker:before, .shell.off .marker:after {{
-                    background:rgba(255,255,255,.35);
-                    box-shadow:none;
-                }}
-                .inside-toggle {{
-                    position:absolute;
-                    left:10px;
-                    top:7px;
-                    z-index:10;
-                    height:20px;
-                    display:flex;
-                    align-items:center;
-                    gap:5px;
-                    border:1px solid rgba(18,214,203,.48);
-                    background:rgba(18,214,203,.14);
-                    color:#dffffd;
-                    border-radius:999px;
-                    padding:2px 7px 2px 4px;
-                    font-size:9px;
-                    font-weight:950;
-                    letter-spacing:.25px;
-                    cursor:default;
-                    pointer-events:none;
-                    box-shadow:0 0 14px rgba(18,214,203,.18);
-                }}
-                .inside-toggle .knob {{
-                    width:14px;
-                    height:14px;
-                    border-radius:50%;
-                    background:var(--teal);
-                    box-shadow:0 0 14px rgba(18,214,203,.72);
-                }}
-                .inside-toggle.off {{
-                    background:rgba(255,255,255,.055);
-                    border-color:rgba(255,255,255,.16);
-                    color:#b9c9c8;
-                    box-shadow:none;
-                }}
-                .inside-toggle.off .knob {{
-                    background:rgba(255,255,255,.28);
-                    box-shadow:none;
-                }}
-                .top {{
-                    height:31px;
-                    display:flex;
-                    align-items:center;
-                    justify-content:center;
-                    gap:8px;
-                    font-size:11px;
-                    color:#dffffd;
-                    padding-top:3px;
-                    padding-left:58px;
-                    padding-right:58px;
-                }}
-                .pill {{
-                    background:var(--teal);
-                    color:#041615;
-                    border-radius:999px;
-                    font-weight:950;
-                    letter-spacing:.35px;
-                    padding:2px 8px;
-                    min-width:48px;
-                    text-align:center;
-                    box-shadow:0 0 18px rgba(18,214,203,.38);
-                }}
-                .timebits {{
-                    display:flex;
-                    gap:10px;
-                    white-space:nowrap;
-                    font-weight:750;
-                }}
-                .timebits b {{ color:#8df7f1; }}
-                .viewport {{
-                    position:absolute;
-                    left:0;
-                    right:0;
-                    top:31px;
-                    bottom:18px;
-                    overflow:hidden;
-                    cursor:grab;
-                }}
-                .viewport.dragging {{ cursor:grabbing; }}
-                .rail {{
-                    position:absolute;
-                    top:18px;
-                    height:42px;
-                    display:flex;
-                    align-items:center;
-                    will-change:transform;
-                    transition:transform 520ms cubic-bezier(.17, .89, .28, 1.22);
-                }}
-                .viewport.dragging .rail {{
-                    transition:none;
-                }}
-                .chip {{
-                    flex:0 0 auto;
-                    width:68px;
-                    height:42px;
-                    margin:0 4px;
-                    border-radius:12px;
-                    border:1px solid rgba(255,255,255,.12);
-                    background:rgba(255,255,255,.045);
-                    display:flex;
-                    flex-direction:column;
-                    align-items:center;
-                    justify-content:center;
-                    color:#cfd8d8;
-                    transform:scale(.88);
-                    opacity:.58;
-                    transition:
-                        transform 420ms cubic-bezier(.17,.89,.28,1.22),
-                        opacity 220ms ease,
-                        background 220ms ease,
-                        border-color 220ms ease,
-                        box-shadow 220ms ease;
-                }}
-                .chip.active {{
-                    transform:scale(1.16);
-                    opacity:1;
-                    color:#ffffff;
-                    background:rgba(18,214,203,.18);
-                    border-color:var(--teal);
-                    box-shadow:0 0 0 1px rgba(18,214,203,.20) inset, 0 0 22px rgba(18,214,203,.28);
-                }}
-                .chip .age {{
-                    font-size:13px;
-                    font-weight:950;
-                    line-height:14px;
-                    letter-spacing:.3px;
-                }}
-                .chip .utc {{
-                    font-size:9px;
-                    color:#86f3ee;
-                    line-height:11px;
-                    font-weight:850;
-                }}
-                .marker {{
-                    position:absolute;
-                    left:50%;
-                    top:31px;
-                    bottom:14px;
-                    width:0;
-                    pointer-events:none;
-                    z-index:5;
-                }}
-                .marker:before {{
-                    content:"";
-                    position:absolute;
-                    top:0;
-                    bottom:0;
-                    left:-1px;
-                    width:2px;
-                    background:var(--teal);
-                    box-shadow:0 0 18px rgba(18,214,203,.9);
-                    border-radius:99px;
-                }}
-                .marker:after {{
-                    content:"";
-                    position:absolute;
-                    top:-3px;
-                    left:-8px;
-                    width:16px;
-                    height:16px;
-                    background:var(--teal);
-                    transform:rotate(45deg);
-                    border-radius:4px;
-                    box-shadow:0 0 20px rgba(18,214,203,.75);
-                }}
-                .glow {{
-                    position:absolute;
-                    left:50%;
-                    top:31px;
-                    bottom:18px;
-                    width:100px;
-                    transform:translateX(-50%);
-                    background:linear-gradient(90deg, transparent, rgba(18,214,203,.12), transparent);
-                    pointer-events:none;
-                    z-index:2;
-                }}
-                .bottom {{
-                    position:absolute;
-                    left:12px;
-                    right:12px;
-                    bottom:4px;
-                    display:flex;
-                    justify-content:space-between;
-                    color:var(--muted);
-                    font-size:9.5px;
-                    font-weight:850;
-                }}
-                .hint {{
-                    position:absolute;
-                    right:12px;
-                    top:8px;
-                    color:#6deee8;
-                    font-size:9px;
-                    font-weight:850;
-                    opacity:.65;
-                }}
-                @media (max-width:760px) {{
-                    .shell {{ height:104px; border-radius:14px; }}
-                    .inside-toggle {{
-                        left:7px;
-                        top:7px;
-                        font-size:8px;
-                        padding-right:6px;
-                    }}
-                    .inside-toggle .knob {{
-                        width:13px;
-                        height:13px;
-                    }}
-                    .top {{
-                        font-size:9.2px;
-                        gap:5px;
-                        padding-left:52px;
-                        padding-right:5px;
-                        justify-content:flex-start;
-                    }}
-                    .timebits {{ gap:6px; }}
-                    .chip {{ width:56px; margin:0 3px; }}
-                    .chip .age {{ font-size:11.5px; }}
-                    .chip .utc {{ font-size:8px; }}
-                    .hint {{ display:none; }}
-                }}
-            </style>
-        </head>
-        <body>
-            <div class="shell" id="shell">
-                <button class="inside-toggle" id="insideToggle" title="24 hour history status">
-                    <span class="knob"></span><span>24h</span>
-                </button>
-                <div class="top">
-                    <span class="pill" id="agePill">NOW</span>
-                    <span class="timebits">
-                        <span><b>UTC</b> <span id="utcLabel"></span></span>
-                        <span><b>LOCAL</b> <span id="localLabel"></span></span>
-                    </span>
-                </div>
-                <div class="hint">drag / wheel</div>
-                <div class="viewport" id="viewport">
-                    <div class="rail" id="rail"></div>
-                </div>
-                <div class="glow"></div>
-                <div class="marker"></div>
-                <div class="bottom">
-                    <span>23h ago</span>
-                    <span>fixed marker</span>
-                    <span>current</span>
-                </div>
-            </div>
-
-            <script>
-                const labels = {payload};
-                let selectedOffset = {selected_json};
-                let historyActive = {active_json};
-                const chipW = window.innerWidth <= 760 ? 62 : 76;
-                const rail = document.getElementById("rail");
-                const viewport = document.getElementById("viewport");
-                const agePill = document.getElementById("agePill");
-                const utcLabel = document.getElementById("utcLabel");
-                const localLabel = document.getElementById("localLabel");
-                const insideToggle = document.getElementById("insideToggle");
-                const shell = document.getElementById("shell");
-
-                labels.forEach(item => {{
-                    const div = document.createElement("div");
-                    div.className = "chip";
-                    div.dataset.offset = item.offset;
-                    div.innerHTML = `<div class="age">${{item.age}}</div><div class="utc">${{item.utc}}</div>`;
-                    div.addEventListener("click", () => selectOffset(item.offset, true));
-                    rail.appendChild(div);
-                }});
-
-                function selectedIndexFromOffset(offset) {{
-                    return labels.findIndex(x => Number(x.offset) === Number(offset));
-                }}
-
-                function offsetFromIndex(index) {{
-                    index = Math.max(0, Math.min(labels.length - 1, index));
-                    return Number(labels[index].offset);
-                }}
-
-                function updateLabels() {{
-                    const item = labels.find(x => Number(x.offset) === Number(selectedOffset)) || labels[labels.length - 1];
-                    agePill.textContent = item.offset === 0 ? "CURRENT" : `${{item.offset}}H AGO`;
-                    utcLabel.textContent = item.utc;
-                    localLabel.textContent = item.local;
-                    insideToggle.classList.toggle("off", !historyActive);
-                    shell.classList.toggle("off", !historyActive);
-                    [...rail.children].forEach(chip => {{
-                        chip.classList.toggle("active", Number(chip.dataset.offset) === Number(selectedOffset));
-                    }});
-                }}
-
-                function centerSelected(animate=true) {{
-                    const idx = selectedIndexFromOffset(selectedOffset);
-                    const vw = viewport.clientWidth;
-                    const x = (vw / 2) - (idx * chipW) - (chipW / 2);
-                    rail.style.transition = animate ? "transform 520ms cubic-bezier(.17,.89,.28,1.22)" : "none";
-                    rail.style.transform = `translateX(${{x}}px)`;
-                    updateLabels();
-                }}
-
-                function setHourAndReload(hourValue) {{
-                    const url = new URL(window.parent.location.href);
-                    // Critical for iPad/Safari and desktop: keep mode + hour in the URL
-                    // so Streamlit restores the same 24h state after the rerun.
-                    url.searchParams.set("history_mode", historyActive ? "1" : "0");
-                    url.searchParams.set("history_hour", String(hourValue));
-                    url.searchParams.set("history_anchor", "1");
-
-                    try {{
-                        window.parent.sessionStorage.setItem("xwind_scroll_y", String(window.parent.scrollY || 0));
-                        window.parent.sessionStorage.setItem("xwind_keep_slider", "1");
-                    }} catch (err) {{}}
-
-                    url.hash = "xwind-history-anchor";
-                    window.parent.location.href = url.toString();
-                }}
-
-                let lastCommittedOffset = selectedOffset;
-                let commitTimer = null;
-
-                function pushToStreamlit(force=false) {{
-                    if (!historyActive) return;
-                    if (!force && Number(selectedOffset) === Number(lastCommittedOffset)) return;
-                    lastCommittedOffset = selectedOffset;
-                    setHourAndReload(selectedOffset);
-                }}
-
-                function scheduleCommit(delay=450) {{
-                    if (!historyActive) return;
-                    clearTimeout(commitTimer);
-                    commitTimer = setTimeout(() => pushToStreamlit(false), delay);
-                }}
-
-                insideToggle.addEventListener("click", (e) => {{
-                    e.preventDefault();
-                    e.stopPropagation();
-                    // The actual ON/OFF state is owned by the native Streamlit toggle
-                    // above the scrubber. This in-box pill is visual only once active.
-                    if (!historyActive) {{
-                        const url = new URL(window.parent.location.href);
-                        url.searchParams.set("history_mode", "1");
-                        url.searchParams.set("history_hour", String(selectedOffset));
-                        insideToggle.querySelector("span:last-child").textContent = "LOADING";
-                        agePill.textContent = "LOADING";
-                        window.parent.location.assign(url.toString());
-                    }}
-                }});
-
-                function selectOffset(offset, commit=false) {{
-                    if (!historyActive) return;
-                    const nextOffset = Math.max(0, Math.min(23, Number(offset)));
-                    const changed = Number(nextOffset) !== Number(selectedOffset);
-                    selectedOffset = nextOffset;
-                    centerSelected(true);
-                    if (commit && changed) {{
-                        scheduleCommit(180);
-                    }}
-                }}
-
-                let startX = 0;
-                let startIdx = 0;
-                let dragging = false;
-                let moved = false;
-
-                function clientX(e) {{
-                    if (e.touches && e.touches.length) return e.touches[0].clientX;
-                    return e.clientX;
-                }}
-
-                function startDrag(e) {{
-                    if (!historyActive) return;
-                    dragging = true;
-                    moved = false;
-                    viewport.classList.add("dragging");
-                    startX = clientX(e);
-                    startIdx = selectedIndexFromOffset(selectedOffset);
-                }}
-
-                function moveDrag(e) {{
-                    if (!dragging) return;
-                    const dx = clientX(e) - startX;
-                    if (Math.abs(dx) > 3) moved = true;
-                    const idxFloat = startIdx - (dx / chipW);
-                    const idx = Math.max(0, Math.min(labels.length - 1, idxFloat));
-                    const vw = viewport.clientWidth;
-                    const x = (vw / 2) - (idx * chipW) - (chipW / 2);
-                    rail.style.transition = "none";
-                    rail.style.transform = `translateX(${{x}}px)`;
-
-                    const nearestIdx = Math.round(idx);
-                    const nextOffset = offsetFromIndex(nearestIdx);
-                    if (Number(nextOffset) !== Number(selectedOffset)) {{
-                        selectedOffset = nextOffset;
-                        updateLabels();
-                        scheduleCommit(700);
-                    }} else {{
-                        updateLabels();
-                    }}
-                    e.preventDefault();
-                }}
-
-                function endDrag() {{
-                    if (!dragging) return;
-                    dragging = false;
-                    viewport.classList.remove("dragging");
-                    centerSelected(true);
-                    if (moved) {{
-                        scheduleCommit(180);
-                    }}
-                }}
-
-                viewport.addEventListener("mousedown", startDrag);
-                window.addEventListener("mousemove", moveDrag);
-                window.addEventListener("mouseup", endDrag);
-
-                viewport.addEventListener("touchstart", startDrag, {{passive:false}});
-                viewport.addEventListener("touchmove", moveDrag, {{passive:false}});
-                viewport.addEventListener("touchend", endDrag);
-                viewport.addEventListener("touchcancel", endDrag);
-                window.addEventListener("blur", () => {{ if (dragging) endDrag(); }});
-
-                viewport.addEventListener("wheel", (e) => {{
-                    e.preventDefault();
-                    if (!historyActive) return;
-                    const direction = Math.sign(e.deltaY || e.deltaX);
-                    const idx = selectedIndexFromOffset(selectedOffset);
-                    const nextIdx = Math.max(0, Math.min(labels.length - 1, idx + direction));
-                    selectOffset(offsetFromIndex(nextIdx), true);
-                }}, {{passive:false}});
-
-                centerSelected(false);
-            </script>
-        </body>
-        </html>
-        """,
-        height=height,
-        scrolling=False,
-    )
+        labels.append({"offset": h, "age": "NOW" if h == 0 else f"-{h}h", "utc": ts_utc.strftime("%H:%MZ"), "local": ts_local.strftime("%H:%M %Z")})
+    height = 104 if phone else 118
+    timeline_component = get_xwind_timeline_component()
+    selected = timeline_component(labels=labels, selected_offset=hour_offset, active=bool(active), phone=bool(phone), height=height, key=f"xwind_timeline_{key_prefix}", default=hour_offset)
+    if selected is None:
+        return hour_offset
+    try:
+        return max(0, min(23, int(selected)))
+    except Exception:
+        return hour_offset
 
 
 def render_history_slider_controls(title_text, phone=False, show_title=True):
-    """Always-visible timeline scrubber with Streamlit-owned history on/off.
-
-    The custom HTML scrubber is only responsible for choosing the hour. The
-    expensive Top 15 24h history build is triggered by this real Streamlit
-    toggle, which avoids iframe/query-param lockups.
-    """
+    # Always-visible timeline scrubber with Streamlit-owned history on/off.
     timezone_name = get_viewer_timezone()
-
     try:
+        qp_history_mode = st.query_params.get("history_mode", None)
+        if isinstance(qp_history_mode, list):
+            qp_history_mode = qp_history_mode[0] if qp_history_mode else None
+        if qp_history_mode is not None:
+            st.session_state.history_mode = str(qp_history_mode).lower() in {"1", "true", "yes", "on"}
         qp_hour = st.query_params.get("history_hour", None)
         if isinstance(qp_hour, list):
             qp_hour = qp_hour[0] if qp_hour else None
@@ -1482,80 +1081,40 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
             st.session_state.history_slider_pos = 23 - st.session_state.history_hour_offset
     except Exception:
         pass
-
-    st.markdown(
-        """
+    st.markdown('''
         <style>
-            :root {
-                --xwind-teal:#12d6cb;
-                --xwind-teal-soft:rgba(18,214,203,0.18);
-                --xwind-teal-mid:rgba(18,214,203,0.42);
-            }
-            .xwind-list-title {
-                font-size: 1.28rem;
-                line-height: 1.05;
-                font-weight: 900;
-                margin: 0rem 0 0.05rem 0;
-            }
-            .history-streamlit-toggle {
-                margin-top: -3px;
-                margin-bottom: 2px;
-            }
-            .history-streamlit-toggle div[data-testid="stToggle"] {
-                min-height: 24px !important;
-            }
-            .history-streamlit-toggle label {
-                font-size: 0.74rem !important;
-                font-weight: 900 !important;
-                color: #dffffd !important;
-                white-space: nowrap !important;
-            }
-            .history-streamlit-toggle [data-testid="stWidgetLabel"] p {
-                font-size: 0.74rem !important;
-                font-weight: 900 !important;
-            }
-            .global-under-title {
-                margin-top:-2px;
-                margin-bottom:2px;
-            }
-            .global-under-title div[data-testid="stCheckbox"] label {
-                font-size: 0.76rem !important;
-                font-weight: 850 !important;
-                white-space: nowrap !important;
-            }
-            @media (max-width: 760px) {
-                .xwind-list-title { font-size: 1rem; padding-top:0px; }
-            }
+            :root { --xwind-teal:#12d6cb; --xwind-teal-soft:rgba(18,214,203,0.18); --xwind-teal-mid:rgba(18,214,203,0.42); }
+            .xwind-list-title { font-size: 1.28rem; line-height: 1.05; font-weight: 900; margin: 0rem 0 0.05rem 0; }
+            .history-streamlit-toggle { margin-top: -3px; margin-bottom: 2px; }
+            .history-streamlit-toggle label { font-size: 0.74rem !important; font-weight: 900 !important; color: #dffffd !important; white-space: nowrap !important; }
+            .history-streamlit-toggle [data-testid="stWidgetLabel"] p { font-size: 0.74rem !important; font-weight: 900 !important; }
+            .global-under-title { margin-top:-2px; margin-bottom:2px; }
+            .global-under-title div[data-testid="stCheckbox"] label { font-size: 0.76rem !important; font-weight: 850 !important; white-space: nowrap !important; }
+            @media (max-width: 760px) { .xwind-list-title { font-size: 1rem; padding-top:0px; } }
         </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
+        ''', unsafe_allow_html=True)
     if show_title:
         st.markdown(f"<div id='xwind-history-anchor' class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
-
     st.markdown("<div class='history-streamlit-toggle'>", unsafe_allow_html=True)
-    history_enabled = st.toggle(
-        "24h history slider",
-        key="history_mode",
-        help="Build/cache the Top 15 airport history, then use the scrubber below to move between hours.",
-    )
+    if hasattr(st, "toggle"):
+        history_enabled = st.toggle("24h history slider", key="history_mode", help="Build/cache the Top 15 airport history, then use the scrubber below to move between hours.")
+    else:
+        history_enabled = st.checkbox("24h history slider", key="history_mode", help="Build/cache the Top 15 airport history, then use the scrubber below to move between hours.")
     st.markdown("</div>", unsafe_allow_html=True)
-
     hour_offset = int(st.session_state.get("history_hour_offset", 0))
     hour_offset = max(0, min(23, hour_offset))
-
-    render_history_timeline_scrubber(
-        hour_offset,
-        timezone_name=timezone_name,
-        phone=phone,
-        key_prefix="phone" if phone else "wide",
-        active=history_enabled,
-    )
-
+    selected_hour = render_history_timeline_scrubber(hour_offset, timezone_name=timezone_name, phone=phone, key_prefix="phone" if phone else "wide", active=history_enabled)
+    if history_enabled:
+        hour_offset = max(0, min(23, int(selected_hour)))
+    else:
+        hour_offset = 0
     st.session_state.history_hour_offset = hour_offset
     st.session_state.history_slider_pos = 23 - hour_offset
-
+    try:
+        st.query_params["history_mode"] = "1" if history_enabled else "0"
+        st.query_params["history_hour"] = str(hour_offset)
+    except Exception:
+        pass
     return history_enabled, hour_offset
 
 def build_history_table(icao, runway_ends_by_icao, min_len, hours=24, timezone_name="America/Los_Angeles"):
