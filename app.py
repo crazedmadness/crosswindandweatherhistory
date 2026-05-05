@@ -26,6 +26,16 @@ if "selected_icao" not in st.session_state:
 if "selected_airport_result" not in st.session_state:
     st.session_state.selected_airport_result = None
 
+# Allow mobile HTML cards to select/expand an airport via query string.
+try:
+    qp_selected = st.query_params.get("selected_icao", None)
+    if isinstance(qp_selected, list):
+        qp_selected = qp_selected[0] if qp_selected else None
+    if qp_selected:
+        st.session_state.selected_icao = str(qp_selected).upper().strip()
+except Exception:
+    pass
+
 
 def get_screen_width():
     """Return browser viewport width when streamlit-js-eval is installed; otherwise None."""
@@ -802,96 +812,103 @@ def render_rows(rows, runway_ends_by_icao, min_len, compact=False, phone=False, 
         color_hex, _ = get_color(r["cw"])
         selected = st.session_state.selected_icao == r["icao"]
 
-        # Phone gets a denser, touch-friendly layout. The crosswind/gust and ICAO
-        # expand button sit together visually as one colored card.
+        # Phone gets a single custom HTML card so the crosswind and ICAO/dropdown
+        # affordance stay on the same horizontal row instead of Streamlit columns
+        # stacking vertically on narrow screens.
         if phone:
-            card_height = 46
-            cw_font = 23
-            gust_font = 12
-            label_font = 7
+            gust_value = r.get("gust_cw")
+            gust_html = ""
+            if gust_value is not None:
+                gust_html = f"""
+                    <div style="border-left:1px solid rgba(255,255,255,0.25); padding-left:7px; margin-left:7px; text-align:center;">
+                        <div style="font-size:13px; line-height:13px; font-weight:950; color:#ffffff;">{gust_value}</div>
+                        <div style="font-size:6px; line-height:7px; color:#dcdcdc; font-weight:900; letter-spacing:.2px;">GUST</div>
+                    </div>
+                """
 
-            with st.container(border=True):
-                cols = st.columns([1.30, 0.82, 1.45], gap="small")
+            gust_text = f"G{r['gust']}" if r.get("gust") is not None else ""
+            airport_short = html.escape(str(r.get("name", "—")))
+            if len(airport_short) > 30:
+                airport_short = airport_short[:27] + "..."
 
-                with cols[0]:
-                    gust_block = ""
-                    if r.get("gust_cw") is not None:
-                        gust_block = f"""
-                        <div style="border-left:1px solid rgba(255,255,255,0.24); padding-left:6px; margin-left:6px; text-align:center;">
-                            <div style="font-size:{gust_font}px; line-height:{gust_font}px; font-weight:950; color:#ffffff;">{r['gust_cw']}</div>
-                            <div style="font-size:6px; color:#dcdcdc; font-weight:900; letter-spacing:.2px;">GUST</div>
-                        </div>
-                        """
+            selected_ring = "box-shadow:0 0 0 2px rgba(255,255,255,0.32) inset;" if selected else ""
+            href = f"?selected_icao={html.escape(str(r['icao']))}"
 
-                    st.markdown(
-                        f"""
+            st.markdown(
+                f"""
+                <a href="{href}" target="_self" style="text-decoration:none; color:inherit;">
+                    <div style="
+                        border:1px solid rgba(255,255,255,0.18);
+                        border-radius:12px;
+                        padding:5px 6px 6px 6px;
+                        margin:0 0 5px 0;
+                        background:rgba(255,255,255,0.025);
+                        {selected_ring}
+                    ">
                         <div style="
-                            border:1px solid {color_hex};
-                            border-right:0;
-                            background:{color_hex}22;
-                            border-radius:11px 0 0 11px;
-                            height:{card_height}px;
-                            display:flex;
-                            justify-content:center;
-                            align-items:center;
-                            box-sizing:border-box;
-                            margin:0;
+                            display:grid;
+                            grid-template-columns: 58% 42%;
+                            min-height:52px;
                         ">
-                            <div style="text-align:center;">
-                                <div style="font-size:{cw_font}px; line-height:{cw_font}px; font-weight:950; color:{color_hex};">{r['cw']}</div>
-                                <div style="font-size:{label_font}px; line-height:{label_font}px; color:#f1f1f1; font-weight:900; letter-spacing:.25px;">KT XWIND</div>
+                            <div style="
+                                border:1px solid {color_hex};
+                                border-right:0;
+                                background:{color_hex}22;
+                                border-radius:10px 0 0 10px;
+                                display:flex;
+                                align-items:center;
+                                justify-content:center;
+                                box-sizing:border-box;
+                            ">
+                                <div style="text-align:center;">
+                                    <div style="font-size:25px; line-height:25px; font-weight:950; color:{color_hex};">{r['cw']}</div>
+                                    <div style="font-size:7px; line-height:8px; color:#f1f1f1; font-weight:900; letter-spacing:.25px;">KT XWIND</div>
+                                </div>
+                                {gust_html}
                             </div>
-                            {gust_block}
+                            <div style="
+                                border:1px solid {color_hex};
+                                background:{color_hex}15;
+                                border-radius:0 10px 10px 0;
+                                display:flex;
+                                align-items:center;
+                                justify-content:center;
+                                flex-direction:column;
+                                box-sizing:border-box;
+                            ">
+                                <div style="font-size:21px; line-height:22px; font-weight:950; color:#ffffff; letter-spacing:.4px;">{html.escape(str(r['icao']))} ▼</div>
+                                <div style="font-size:7px; line-height:8px; color:#dcdcdc; font-weight:800;">tap for history</div>
+                            </div>
                         </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-
-                with cols[1]:
-                    st.markdown(
-                        f"""
-                        <style>
-                        div[data-testid="stButton"] button[kind="secondary"] {{
-                            min-height:{card_height}px !important;
-                            height:{card_height}px !important;
-                        }}
-                        </style>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-                    st.button(
-                        f"{r['icao']} ▾",
-                        key=f"select_{r['icao']}_{i}_phone",
-                        on_click=row_click,
-                        args=(r["icao"],),
-                        use_container_width=True,
-                    )
-
-                with cols[2]:
-                    gust_text = f"G{r['gust']}" if r.get("gust") is not None else ""
-                    airport_short = html.escape(str(r.get("name", "—")))
-                    if len(airport_short) > 24:
-                        airport_short = airport_short[:21] + "..."
-                    st.markdown(
-                        f"""
-                        <div style="font-size:10.5px; line-height:12px; margin-top:1px;">
-                            <b>{r['wind']}{gust_text}</b><br>
-                            RWY {html.escape(str(r['runway']))} · {r['length']} ft<br>
-                            <span style="color:#cfcfcf;">{airport_short}</span>
+                        <div style="
+                            display:grid;
+                            grid-template-columns: 32% 35% 33%;
+                            column-gap:4px;
+                            color:#d8d8d8;
+                            font-size:10px;
+                            line-height:12px;
+                            padding-top:4px;
+                            overflow:hidden;
+                        ">
+                            <div><b>{html.escape(str(r['wind']))}{gust_text}</b></div>
+                            <div>RWY {html.escape(str(r['runway']))} · {r['length']} ft</div>
+                            <div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{airport_short}</div>
                         </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
+                    </div>
+                </a>
+                """,
+                unsafe_allow_html=True,
+            )
 
-                if selected:
-                    render_history_panel(
-                        r["icao"],
-                        runway_ends_by_icao,
-                        min_len,
-                        title="Past 24 Hours",
-                        phone=phone,
-                        side_by_side_charts=side_by_side_charts,
-                    )
+            if selected:
+                render_history_panel(
+                    r["icao"],
+                    runway_ends_by_icao,
+                    min_len,
+                    title="Past 24 Hours",
+                    phone=phone,
+                    side_by_side_charts=side_by_side_charts,
+                )
 
             continue
 
