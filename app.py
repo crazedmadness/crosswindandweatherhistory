@@ -29,7 +29,9 @@ if "selected_airport_result" not in st.session_state:
     st.session_state.selected_airport_result = None
 
 if "history_mode" not in st.session_state:
-    st.session_state.history_mode = False
+    # Show the 24h timeline UI by default. The expensive history cache still
+    # builds only when the selected hour is not current.
+    st.session_state.history_mode = True
 
 if "history_slider_pos" not in st.session_state:
     # Slider position is 0 = 23 hours ago, 23 = current/right side.
@@ -51,6 +53,24 @@ try:
         qp_selected = qp_selected[0] if qp_selected else None
     if qp_selected:
         st.session_state.selected_icao = str(qp_selected).upper().strip()
+except Exception:
+    pass
+
+# Keep the custom timeline scrubber state alive across URL-driven reruns.
+try:
+    qp_history_mode = st.query_params.get("history_mode", None)
+    if isinstance(qp_history_mode, list):
+        qp_history_mode = qp_history_mode[0] if qp_history_mode else None
+    if qp_history_mode is not None:
+        st.session_state.history_mode = str(qp_history_mode).lower() in {"1", "true", "yes", "on"}
+
+    qp_history_hour = st.query_params.get("history_hour", None)
+    if isinstance(qp_history_hour, list):
+        qp_history_hour = qp_history_hour[0] if qp_history_hour else None
+    if qp_history_hour is not None:
+        selected_hour = max(0, min(23, int(qp_history_hour)))
+        st.session_state.history_hour_offset = selected_hour
+        st.session_state.history_slider_pos = 23 - selected_hour
 except Exception:
     pass
 
@@ -928,7 +948,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
     """Render a custom JS timeline scrubber with a fixed center marker.
 
     The timeline slides behind the center marker. It updates Streamlit by
-    changing the URL query param history_hour, then forcing a rerun.
+    changing URL query params. The 24h toggle lives inside the box once open.
     """
     try:
         hour_offset = int(hour_offset)
@@ -957,7 +977,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
     import json
     payload = json.dumps(labels)
     selected_json = json.dumps(hour_offset)
-    height = 112 if phone else 118
+    height = 104 if phone else 106
 
     components.html(
         f"""
@@ -996,8 +1016,35 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                     user-select:none;
                     touch-action:pan-y;
                 }}
+                .inside-toggle {{
+                    position:absolute;
+                    left:10px;
+                    top:5px;
+                    z-index:10;
+                    height:20px;
+                    display:flex;
+                    align-items:center;
+                    gap:5px;
+                    border:1px solid rgba(18,214,203,.48);
+                    background:rgba(18,214,203,.14);
+                    color:#dffffd;
+                    border-radius:999px;
+                    padding:2px 7px 2px 4px;
+                    font-size:9px;
+                    font-weight:950;
+                    letter-spacing:.25px;
+                    cursor:pointer;
+                    box-shadow:0 0 14px rgba(18,214,203,.18);
+                }}
+                .inside-toggle .knob {{
+                    width:14px;
+                    height:14px;
+                    border-radius:50%;
+                    background:var(--teal);
+                    box-shadow:0 0 14px rgba(18,214,203,.72);
+                }}
                 .top {{
-                    height:31px;
+                    height:27px;
                     display:flex;
                     align-items:center;
                     justify-content:center;
@@ -1005,6 +1052,8 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                     font-size:11px;
                     color:#dffffd;
                     padding-top:3px;
+                    padding-left:58px;
+                    padding-right:58px;
                 }}
                 .pill {{
                     background:var(--teal);
@@ -1028,15 +1077,15 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                     position:absolute;
                     left:0;
                     right:0;
-                    top:31px;
-                    bottom:18px;
+                    top:27px;
+                    bottom:15px;
                     overflow:hidden;
                     cursor:grab;
                 }}
                 .viewport.dragging {{ cursor:grabbing; }}
                 .rail {{
                     position:absolute;
-                    top:18px;
+                    top:14px;
                     height:42px;
                     display:flex;
                     align-items:center;
@@ -1091,8 +1140,8 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                 .marker {{
                     position:absolute;
                     left:50%;
-                    top:30px;
-                    bottom:14px;
+                    top:27px;
+                    bottom:12px;
                     width:0;
                     pointer-events:none;
                     z-index:5;
@@ -1123,8 +1172,8 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                 .glow {{
                     position:absolute;
                     left:50%;
-                    top:31px;
-                    bottom:18px;
+                    top:27px;
+                    bottom:15px;
                     width:100px;
                     transform:translateX(-50%);
                     background:linear-gradient(90deg, transparent, rgba(18,214,203,.12), transparent);
@@ -1135,7 +1184,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                     position:absolute;
                     left:12px;
                     right:12px;
-                    bottom:4px;
+                    bottom:3px;
                     display:flex;
                     justify-content:space-between;
                     color:var(--muted);
@@ -1145,7 +1194,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                 .hint {{
                     position:absolute;
                     right:12px;
-                    top:8px;
+                    top:6px;
                     color:#6deee8;
                     font-size:9px;
                     font-weight:850;
@@ -1153,7 +1202,23 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                 }}
                 @media (max-width:760px) {{
                     .shell {{ height:104px; border-radius:14px; }}
-                    .top {{ font-size:9.2px; gap:5px; }}
+                    .inside-toggle {{
+                        left:7px;
+                        top:7px;
+                        font-size:8px;
+                        padding-right:6px;
+                    }}
+                    .inside-toggle .knob {{
+                        width:13px;
+                        height:13px;
+                    }}
+                    .top {{
+                        font-size:9.2px;
+                        gap:5px;
+                        padding-left:52px;
+                        padding-right:5px;
+                        justify-content:flex-start;
+                    }}
                     .timebits {{ gap:6px; }}
                     .chip {{ width:56px; margin:0 3px; }}
                     .chip .age {{ font-size:11.5px; }}
@@ -1164,6 +1229,9 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
         </head>
         <body>
             <div class="shell">
+                <button class="inside-toggle" id="insideToggle" title="Turn off 24 hour history">
+                    <span class="knob"></span><span>24h</span>
+                </button>
                 <div class="top">
                     <span class="pill" id="agePill">NOW</span>
                     <span class="timebits">
@@ -1193,6 +1261,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                 const agePill = document.getElementById("agePill");
                 const utcLabel = document.getElementById("utcLabel");
                 const localLabel = document.getElementById("localLabel");
+                const insideToggle = document.getElementById("insideToggle");
 
                 labels.forEach(item => {{
                     const div = document.createElement("div");
@@ -1231,12 +1300,22 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                     updateLabels();
                 }}
 
-                function pushToStreamlit() {{
+                function setParamsAndReload(modeValue, hourValue) {{
                     const url = new URL(window.parent.location.href);
-                    url.searchParams.set("history_hour", String(selectedOffset));
-                    window.parent.history.replaceState(null, "", url.toString());
-                    window.parent.location.reload();
+                    url.searchParams.set("history_mode", modeValue ? "1" : "0");
+                    url.searchParams.set("history_hour", String(hourValue));
+                    window.parent.location.href = url.toString();
                 }}
+
+                function pushToStreamlit() {{
+                    setParamsAndReload(true, selectedOffset);
+                }}
+
+                insideToggle.addEventListener("click", (e) => {{
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setParamsAndReload(false, selectedOffset);
+                }});
 
                 let commitTimer = null;
                 function selectOffset(offset, commit=false) {{
@@ -1324,8 +1403,14 @@ def render_history_slider_controls(title_text, phone=False):
     """Top-of-list time-machine switch + custom elastic timeline scrubber."""
     timezone_name = get_viewer_timezone()
 
-    # Read selected hour from the custom JS scrubber URL param.
+    # Read selected state from URL params written by the custom JS scrubber.
     try:
+        qp_mode = st.query_params.get("history_mode", None)
+        if isinstance(qp_mode, list):
+            qp_mode = qp_mode[0] if qp_mode else None
+        if qp_mode is not None:
+            st.session_state.history_mode = str(qp_mode).lower() in {"1", "true", "yes", "on"}
+
         qp_hour = st.query_params.get("history_hour", None)
         if isinstance(qp_hour, list):
             qp_hour = qp_hour[0] if qp_hour else None
@@ -1366,33 +1451,47 @@ def render_history_slider_controls(title_text, phone=False):
         unsafe_allow_html=True,
     )
 
-    history_enabled = False
+    history_enabled = bool(st.session_state.get("history_mode", False))
     hour_offset = int(st.session_state.get("history_hour_offset", 0))
 
     if phone:
-        c_title, c_toggle = st.columns([1.6, 0.95], gap="small")
-        with c_title:
-            st.markdown(f"<div class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
-        with c_toggle:
-            history_enabled = st.toggle("24h", value=st.session_state.history_mode, key="history_mode_toggle_phone")
-
         if history_enabled:
-            render_history_timeline_scrubber(hour_offset, timezone_name=timezone_name, phone=True, key_prefix="phone")
-    else:
-        c_title, c_toggle, c_slider = st.columns([0.95, 0.24, 2.35], gap="small")
-        with c_title:
             st.markdown(f"<div class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
-        with c_toggle:
-            history_enabled = st.toggle("24h", value=st.session_state.history_mode, key="history_mode_toggle")
-        with c_slider:
-            if history_enabled:
+            render_history_timeline_scrubber(hour_offset, timezone_name=timezone_name, phone=True, key_prefix="phone")
+        else:
+            c_title, c_toggle = st.columns([1.6, 0.95], gap="small")
+            with c_title:
+                st.markdown(f"<div class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
+            with c_toggle:
+                history_enabled = st.toggle("24h", value=False, key="history_mode_toggle_phone")
+    else:
+        if history_enabled:
+            c_title, c_slider = st.columns([0.95, 2.59], gap="small")
+            with c_title:
+                st.markdown(f"<div class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
+            with c_slider:
                 render_history_timeline_scrubber(hour_offset, timezone_name=timezone_name, phone=False, key_prefix="wide")
-            else:
+        else:
+            c_title, c_toggle, c_slider = st.columns([0.95, 0.24, 2.35], gap="small")
+            with c_title:
+                st.markdown(f"<div class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
+            with c_toggle:
+                history_enabled = st.toggle("24h", value=False, key="history_mode_toggle")
+            with c_slider:
                 st.markdown("<div style='height:44px;'></div>", unsafe_allow_html=True)
 
     st.session_state.history_mode = history_enabled
     st.session_state.history_hour_offset = hour_offset
     st.session_state.history_slider_pos = 23 - hour_offset
+
+    # When enabled by the Streamlit toggle, put mode in the URL so timeline updates preserve it.
+    if history_enabled:
+        try:
+            if str(st.query_params.get("history_mode", "")) != "1":
+                st.query_params["history_mode"] = "1"
+                st.query_params["history_hour"] = str(hour_offset)
+        except Exception:
+            pass
 
     return history_enabled, hour_offset
 
@@ -2536,9 +2635,24 @@ def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_b
 
 
 def apply_history_mode_results(history_enabled, hour_offset, live_results):
-    """Return live results or a prebuilt hourly snapshot."""
+    """Return live results or a prebuilt hourly snapshot.
+
+    Timeline UI can be visible by default without immediately building the
+    24-hour cache. Cache builds only after the user picks a past hour.
+    """
     if not history_enabled:
         return live_results, None
+
+    # Current/right side should behave exactly like live mode and avoid the
+    # expensive 24h history build until the user actually scrubs backward.
+    if int(hour_offset) <= 0:
+        return live_results, {
+            "snapshots": {0: live_results},
+            "candidate_icaos": [r.get("icao") for r in live_results if r.get("icao")],
+            "candidate_pool_size": len(live_results),
+            "built_at_utc": pd.Timestamp.now(tz="UTC"),
+            "live_current": True,
+        }
 
     key = history_cache_key(active_icaos, use_global, min_wind, min_len, top_n)
     if key in st.session_state.history_snapshot_cache:
