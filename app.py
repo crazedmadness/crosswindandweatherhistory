@@ -7,6 +7,11 @@ import pydeck as pdk
 import altair as alt
 from zoneinfo import ZoneInfo
 
+try:
+    from streamlit_js_eval import streamlit_js_eval
+except Exception:
+    streamlit_js_eval = None
+
 BATCH_SIZE = 250
 
 CLOSED_RUNWAYS = {
@@ -20,6 +25,22 @@ if "selected_icao" not in st.session_state:
 
 if "selected_airport_result" not in st.session_state:
     st.session_state.selected_airport_result = None
+
+
+def get_screen_width():
+    """Return browser viewport width when streamlit-js-eval is installed; otherwise None."""
+    if streamlit_js_eval is None:
+        return None
+    try:
+        return streamlit_js_eval(js_expressions="window.innerWidth", key="screen_width")
+    except Exception:
+        return None
+
+
+screen_width = get_screen_width()
+is_phone = screen_width is not None and screen_width < 700
+is_tablet = screen_width is not None and 700 <= screen_width < 1100
+is_desktop = not is_phone and not is_tablet
 
 def get_color(cw):
     if cw is None or pd.isna(cw):
@@ -224,11 +245,16 @@ def safe_number(value):
         return None
 
 
-def render_weather_history_charts(hist, airport_elevation_ft=None):
-    """Render crosswind and ceiling charts side-by-side."""
+def render_weather_history_charts(hist, airport_elevation_ft=None, side_by_side=True, phone=False):
+    """Render crosswind and ceiling charts. Desktop/tablet can use side-by-side; phone stacks them."""
     chart_hist = hist.sort_values("Time").copy()
+    chart_height = 185 if phone else 220
 
-    left, right = st.columns(2)
+    if side_by_side:
+        left, right = st.columns(2)
+    else:
+        left = st.container()
+        right = st.container()
 
     with left:
         xwind_df = chart_hist[["Time", "Xwind"]].dropna().copy()
@@ -246,7 +272,7 @@ def render_weather_history_charts(hist, airport_elevation_ft=None):
                         alt.Tooltip("Xwind:Q", title="Crosswind", format=".1f"),
                     ],
                 )
-                .properties(height=220)
+                .properties(height=chart_height)
             )
             st.altair_chart(xwind_chart, use_container_width=True)
 
@@ -293,22 +319,33 @@ def render_weather_history_charts(hist, airport_elevation_ft=None):
             )
             layers.append(elev_line)
 
-        ceiling_chart = alt.layer(*layers).properties(height=220)
+        ceiling_chart = alt.layer(*layers).properties(height=chart_height)
 
-        chart_col, legend_col = st.columns([0.88, 0.12], gap="small")
-        with chart_col:
+        if phone:
             st.altair_chart(ceiling_chart, use_container_width=True)
-        with legend_col:
             st.markdown(
                 """
-                <div style="height:220px; display:flex; align-items:center; justify-content:flex-start;">
-                    <div style="color:#e6d3a3; font-size:12px; font-weight:800; white-space:nowrap;">
-                        <span style="letter-spacing:1px;">- - -</span> airport elev
-                    </div>
+                <div style="color:#e6d3a3; font-size:11px; font-weight:800; margin-top:-8px; margin-bottom:6px;">
+                    <span style="letter-spacing:1px;">- - -</span> airport elev
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
+        else:
+            chart_col, legend_col = st.columns([0.88, 0.12], gap="small")
+            with chart_col:
+                st.altair_chart(ceiling_chart, use_container_width=True)
+            with legend_col:
+                st.markdown(
+                    """
+                    <div style="height:220px; display:flex; align-items:center; justify-content:flex-start;">
+                        <div style="color:#e6d3a3; font-size:12px; font-weight:800; white-space:nowrap;">
+                            <span style="letter-spacing:1px;">- - -</span> airport elev
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
 def parse_wind_from_metar(m, allow_vrb=False):
     """Return wind_dir, wind_spd, wind_gust, vrb flag. Returns None if unusable."""
@@ -657,7 +694,7 @@ def build_history_table(icao, runway_ends_by_icao, min_len, hours=24, timezone_n
     return df
 
 
-def render_history_panel(icao, runway_ends_by_icao, min_len, title="Past 24 Hours"):
+def render_history_panel(icao, runway_ends_by_icao, min_len, title="Past 24 Hours", phone=False, side_by_side_charts=True):
     with st.expander(f"{title} — {icao}", expanded=False):
         timezone_name = get_viewer_timezone()
         hist = build_history_table(icao, runway_ends_by_icao, min_len, hours=24, timezone_name=timezone_name)
@@ -672,9 +709,16 @@ def render_history_panel(icao, runway_ends_by_icao, min_len, title="Past 24 Hour
         st.caption(f"Latest obs: {latest_time} • Peak total wind: {peak_wind:.1f} kt • METAR: {latest_raw_metar}")
 
         airport_elevation = hist["Elevation"].dropna().iloc[0] if "Elevation" in hist.columns and hist["Elevation"].notna().any() else None
-        render_weather_history_charts(hist, airport_elevation_ft=airport_elevation)
+        render_weather_history_charts(hist, airport_elevation_ft=airport_elevation, side_by_side=side_by_side_charts, phone=phone)
 
-        table_df = hist[[
+        history_columns = [
+            "Time Display",
+            "Wind",
+            "Visibility",
+            "Ceiling",
+            "Xwind",
+            "Gust Xwind",
+        ] if phone else [
             "Time Display",
             "Wind",
             "Visibility",
@@ -684,7 +728,9 @@ def render_history_panel(icao, runway_ends_by_icao, min_len, title="Past 24 Hour
             "Length",
             "Xwind",
             "Gust Xwind",
-        ]].copy()
+        ]
+
+        table_df = hist[history_columns].copy()
 
         def xwind_cell_style(value):
             try:
@@ -711,7 +757,7 @@ def render_history_panel(icao, runway_ends_by_icao, min_len, title="Past 24 Hour
             styled_table,
             use_container_width=True,
             hide_index=True,
-            height=260,
+            height=230 if phone else 260,
             column_config={
                 "Time Display": st.column_config.TextColumn("UTC (Local)"),
                 "Wind": st.column_config.TextColumn("Wind"),
@@ -745,20 +791,28 @@ def airport_name_with_elevation(row):
     return f"{name} ({elev})" if elev != "—" else name
 
 
-def render_rows(rows, runway_ends_by_icao, min_len, compact=False):
+def render_rows(rows, runway_ends_by_icao, min_len, compact=False, phone=False, side_by_side_charts=True):
     for i, r in enumerate(rows, 1):
         color_hex, _ = get_color(r["cw"])
         selected = st.session_state.selected_icao == r["icao"]
+        card_height = 46 if phone else 54
+        cw_font = 22 if phone else 26
+        gust_font = 13 if phone else 16
+        label_font = 8 if phone else 9
+        row_num_font = 12 if phone else 14
+        row_num_pad = 14 if phone else 18
 
         with st.container(border=True):
-            if compact:
+            if phone:
+                cols = st.columns([0.28, 1.05, 0.82, 0.72, 1.15])
+            elif compact:
                 cols = st.columns([0.35, 1.2, 0.9, 0.85, 1.15])
             else:
                 cols = st.columns([0.35, 1.35, 0.95, 0.8, 1.05, 0.7, 2.35])
 
             with cols[0]:
                 st.markdown(
-                    f"<div style='padding-top:18px; font-weight:900; color:#d8d8d8; font-size:14px;'>#{i}</div>",
+                    f"<div style='padding-top:{row_num_pad}px; font-weight:900; color:#d8d8d8; font-size:{row_num_font}px;'>#{i}</div>",
                     unsafe_allow_html=True,
                 )
 
@@ -767,7 +821,7 @@ def render_rows(rows, runway_ends_by_icao, min_len, compact=False):
                 if r.get("gust_cw") is not None:
                     gust_block = f"""
                     <div style="border-left:1px solid rgba(255,255,255,0.25); padding-left:10px; margin-left:8px; text-align:center;">
-                        <div style="font-size:16px; line-height:16px; font-weight:950; color:#ffffff;">{r['gust_cw']}</div>
+                        <div style="font-size:{gust_font}px; line-height:{gust_font}px; font-weight:950; color:#ffffff;">{r['gust_cw']}</div>
                         <div style="font-size:8px; color:#dcdcdc; font-weight:900; letter-spacing:.3px;">GUST</div>
                     </div>
                     """
@@ -778,7 +832,7 @@ def render_rows(rows, runway_ends_by_icao, min_len, compact=False):
                         border:1px solid {color_hex};
                         background:{color_hex}22;
                         border-radius:13px;
-                        height:54px;
+                        height:{card_height}px;
                         display:flex;
                         justify-content:center;
                         align-items:center;
@@ -787,8 +841,8 @@ def render_rows(rows, runway_ends_by_icao, min_len, compact=False):
                         margin-bottom:2px;
                     ">
                         <div style="text-align:center;">
-                            <div style="font-size:26px; line-height:26px; font-weight:950; color:{color_hex};">{r["cw"]}</div>
-                            <div style="font-size:9px; color:#f1f1f1; font-weight:900; letter-spacing:.4px;">KT XWIND</div>
+                            <div style="font-size:{cw_font}px; line-height:{cw_font}px; font-weight:950; color:{color_hex};">{r["cw"]}</div>
+                            <div style="font-size:{label_font}px; color:#f1f1f1; font-weight:900; letter-spacing:.4px;">KT XWIND</div>
                         </div>
                         {gust_block}
                     </div>
@@ -797,7 +851,7 @@ def render_rows(rows, runway_ends_by_icao, min_len, compact=False):
                 )
 
             with cols[2]:
-                label = f"{r['icao']}"
+                label = f"{r['icao']} ▼"
                 st.button(
                     label,
                     key=f"select_{r['icao']}_{i}_{'compact' if compact else 'wide'}",
@@ -806,7 +860,7 @@ def render_rows(rows, runway_ends_by_icao, min_len, compact=False):
                     use_container_width=True,
                 )
 
-            if compact:
+            if compact or phone:
                 with cols[3]:
                     gust_text = f"G{r['gust']}" if r.get("gust") is not None else ""
                     st.markdown(f"**Wind**  \n{r['wind']}{gust_text}")
@@ -830,7 +884,7 @@ def render_rows(rows, runway_ends_by_icao, min_len, compact=False):
                 )
 
             if selected:
-                render_history_panel(r["icao"], runway_ends_by_icao, min_len, title="Past 24 Hours")
+                render_history_panel(r["icao"], runway_ends_by_icao, min_len, title="Past 24 Hours", phone=phone, side_by_side_charts=side_by_side_charts)
 
 
 def make_runway_line(row, distance_nm=8):
@@ -968,7 +1022,7 @@ def render_map(rows, height=650):
     st.caption("Red >20 kt • Orange 15–20 kt • Yellow ≤15 kt • White line = runway • Blue arrow = wind toward airport")
 
 
-def render_search_panel(active_airports, airport_lookup, runway_ends_by_icao, min_len, compact=False):
+def render_search_panel(active_airports, airport_lookup, runway_ends_by_icao, min_len, compact=False, phone=False, side_by_side_charts=True):
     st.markdown("### Airport Search")
 
     query = st.text_input(
@@ -1024,7 +1078,7 @@ def render_search_panel(active_airports, airport_lookup, runway_ends_by_icao, mi
     with st.container(border=True):
         st.markdown(
             f"""
-            <div style="font-size:17px; font-weight:900; line-height:1.12;">
+            <div style="font-size:15px; font-weight:900; line-height:1.12;">
                 {result['icao']} — {airport_name_with_elevation(result)}
             </div>
             <div style="font-size:12px; color:#aaa; margin-bottom:6px;">
@@ -1105,7 +1159,7 @@ def render_search_panel(active_airports, airport_lookup, runway_ends_by_icao, mi
             st.session_state.selected_airport_result = result
             st.rerun()
 
-        render_history_panel(result["icao"], runway_ends_by_icao, min_len, title="Past 24 Hours")
+        render_history_panel(result["icao"], runway_ends_by_icao, min_len, title="Past 24 Hours", phone=phone, side_by_side_charts=side_by_side_charts)
 
 
 airports, runway_ends, runway_ends_by_icao, airport_lookup = load_data()
@@ -1121,12 +1175,12 @@ if "min_len" not in st.session_state:
 if "top_n" not in st.session_state:
     st.session_state.top_n = 30
 if "layout_mode" not in st.session_state:
-    st.session_state.layout_mode = "Wide"
+    st.session_state.layout_mode = "Stacked" if is_phone else "Wide"
 if "use_global" not in st.session_state:
     st.session_state.use_global = False
 
 
-def render_top_header_controls():
+def render_top_header_controls(phone=False):
     st.markdown(
         """
         <style>
@@ -1150,12 +1204,20 @@ def render_top_header_controls():
                 margin-top: -8px;
                 margin-bottom: 0px;
             }
+            .phone-title h1 {
+                font-size: 1.35rem !important;
+                line-height: 1.2 !important;
+            }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    c1, c2, c3, c4, c5 = st.columns([1.1, 0.85, 1.0, 0.7, 0.7], gap="small")
+    if phone:
+        c1, c2 = st.columns([1.1, 0.85], gap="small")
+        c3, c4, c5 = st.columns([1.0, 0.7, 0.7], gap="small")
+    else:
+        c1, c2, c3, c4, c5 = st.columns([1.1, 0.85, 1.0, 0.7, 0.7], gap="small")
 
     with c1:
         st.markdown("<div class='compact-label'>RUNWAY</div>", unsafe_allow_html=True)
@@ -1209,19 +1271,44 @@ def render_top_header_controls():
     return min_len_value, top_n_value, layout_value, global_value, refresh_value
 
 
-header_left, header_right = st.columns([2, 1])
-
-with header_left:
+if is_phone:
+    st.markdown('<div class="phone-title">', unsafe_allow_html=True)
     st.title("Crosswind and Weather History")
-    st.caption("Crosswinds color-coded by strength. Click an ICAO or search airport to zoom the map.")
+    st.markdown('</div>', unsafe_allow_html=True)
+    st.caption("Tap an ICAO ▼ to expand weather history.")
+    min_len, top_n, layout_mode, use_global, refresh = render_top_header_controls(phone=True)
+else:
+    header_left, header_right = st.columns([2, 1])
 
-with header_right:
-    min_len, top_n, layout_mode, use_global, refresh = render_top_header_controls()
+    with header_left:
+        st.title("Crosswind and Weather History")
+        st.caption("Crosswinds color-coded by strength. Click an ICAO ▼ or search airport to zoom the map.")
+
+    with header_right:
+        min_len, top_n, layout_mode, use_global, refresh = render_top_header_controls(phone=False)
 
 st.session_state.min_len = min_len
 st.session_state.top_n = top_n
 st.session_state.layout_mode = layout_mode
 st.session_state.use_global = use_global
+
+# Responsive behavior based on viewport width. Phone always uses stacked compact layout.
+if is_phone:
+    layout_mode = "Stacked"
+    map_height = 350
+    compact_rows = True
+    side_by_side_charts = False
+    row_window_height = None
+elif is_tablet:
+    map_height = 500
+    compact_rows = True
+    side_by_side_charts = True
+    row_window_height = 780
+else:
+    map_height = 650
+    compact_rows = False
+    side_by_side_charts = True
+    row_window_height = 920
 
 if refresh:
     get_metars.clear()
@@ -1247,19 +1334,49 @@ if layout_mode == "Wide":
 
     with left:
         st.subheader("Global Crosswinds" if use_global else "US Crosswinds")
-        with st.container(height=920, border=False):
-            render_rows(results[:top_n], runway_ends_by_icao, min_len, compact=False)
+        with st.container(height=row_window_height, border=False):
+            render_rows(
+                results[:top_n],
+                runway_ends_by_icao,
+                min_len,
+                compact=compact_rows,
+                phone=is_phone,
+                side_by_side_charts=side_by_side_charts,
+            )
 
     with right:
         st.subheader("Map")
-        render_map(results[:top_n], height=650)
-        render_search_panel(active_airports, airport_lookup, runway_ends_by_icao, min_len, compact=True)
+        render_map(results[:top_n], height=map_height)
+        render_search_panel(
+            active_airports,
+            airport_lookup,
+            runway_ends_by_icao,
+            min_len,
+            compact=True,
+            phone=is_phone,
+            side_by_side_charts=side_by_side_charts,
+        )
 
 else:
     st.subheader("Map")
-    render_map(results[:top_n], height=520)
+    render_map(results[:top_n], height=map_height)
 
-    render_search_panel(active_airports, airport_lookup, runway_ends_by_icao, min_len, compact=True)
+    render_search_panel(
+        active_airports,
+        airport_lookup,
+        runway_ends_by_icao,
+        min_len,
+        compact=True,
+        phone=is_phone,
+        side_by_side_charts=side_by_side_charts,
+    )
 
     st.subheader("Global Crosswinds" if use_global else "US Crosswinds")
-    render_rows(results[:top_n], runway_ends_by_icao, min_len, compact=True)
+    render_rows(
+        results[:top_n],
+        runway_ends_by_icao,
+        min_len,
+        compact=True,
+        phone=is_phone,
+        side_by_side_charts=side_by_side_charts,
+    )
