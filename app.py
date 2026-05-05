@@ -38,9 +38,15 @@ def get_screen_width():
 
 
 screen_width = get_screen_width()
-is_phone = screen_width is not None and screen_width < 700
-is_tablet = screen_width is not None and 700 <= screen_width < 1100
-is_desktop = not is_phone and not is_tablet
+
+# Responsive breakpoints are based on viewport width, not device name.
+# Phone: compact stacked layout.
+# Tablet: compact UI; stacked in portrait/narrow widths, wide in landscape.
+# Desktop/unknown: full wide dashboard.
+is_phone = screen_width is not None and screen_width < 760
+is_tablet = screen_width is not None and 760 <= screen_width < 1180
+is_desktop = screen_width is None or screen_width >= 1180
+preferred_layout_mode = "Stacked" if (screen_width is not None and screen_width < 980) else "Wide"
 
 def get_color(cw):
     if cw is None or pd.isna(cw):
@@ -248,7 +254,7 @@ def safe_number(value):
 def render_weather_history_charts(hist, airport_elevation_ft=None, side_by_side=True, phone=False):
     """Render crosswind and ceiling charts. Desktop/tablet can use side-by-side; phone stacks them."""
     chart_hist = hist.sort_values("Time").copy()
-    chart_height = 185 if phone else 220
+    chart_height = 165 if phone else 205 if is_tablet else 220
 
     if side_by_side:
         left, right = st.columns(2)
@@ -795,18 +801,98 @@ def render_rows(rows, runway_ends_by_icao, min_len, compact=False, phone=False, 
     for i, r in enumerate(rows, 1):
         color_hex, _ = get_color(r["cw"])
         selected = st.session_state.selected_icao == r["icao"]
-        card_height = 46 if phone else 54
-        cw_font = 22 if phone else 26
-        gust_font = 13 if phone else 16
-        label_font = 8 if phone else 9
-        row_num_font = 12 if phone else 14
-        row_num_pad = 14 if phone else 18
+
+        # Phone gets a separate, denser row layout. The goal is more rows per screen
+        # while preserving the core scan data: xwind, ICAO, wind, runway, airport.
+        if phone:
+            card_height = 34
+            cw_font = 18
+            gust_font = 10
+            label_font = 7
+
+            with st.container(border=True):
+                cols = st.columns([0.98, 0.62, 1.9], gap="small")
+
+                with cols[0]:
+                    gust_block = ""
+                    if r.get("gust_cw") is not None:
+                        gust_block = f"""
+                        <div style="border-left:1px solid rgba(255,255,255,0.24); padding-left:5px; margin-left:5px; text-align:center;">
+                            <div style="font-size:{gust_font}px; line-height:{gust_font}px; font-weight:950; color:#ffffff;">{r['gust_cw']}</div>
+                            <div style="font-size:6px; color:#dcdcdc; font-weight:900; letter-spacing:.2px;">GUST</div>
+                        </div>
+                        """
+
+                    st.markdown(
+                        f"""
+                        <div style="
+                            border:1px solid {color_hex};
+                            background:{color_hex}22;
+                            border-radius:10px;
+                            height:{card_height}px;
+                            display:flex;
+                            justify-content:center;
+                            align-items:center;
+                            box-sizing:border-box;
+                            margin-top:0px;
+                            margin-bottom:0px;
+                        ">
+                            <div style="text-align:center;">
+                                <div style="font-size:{cw_font}px; line-height:{cw_font}px; font-weight:950; color:{color_hex};">{r['cw']}</div>
+                                <div style="font-size:{label_font}px; line-height:{label_font}px; color:#f1f1f1; font-weight:900; letter-spacing:.25px;">KT XWIND</div>
+                            </div>
+                            {gust_block}
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+                with cols[1]:
+                    st.button(
+                        f"{r['icao']} ▾",
+                        key=f"select_{r['icao']}_{i}_phone",
+                        on_click=row_click,
+                        args=(r["icao"],),
+                        use_container_width=True,
+                    )
+
+                with cols[2]:
+                    gust_text = f"G{r['gust']}" if r.get("gust") is not None else ""
+                    airport_short = html.escape(str(r.get("name", "—")))
+                    if len(airport_short) > 34:
+                        airport_short = airport_short[:31] + "..."
+                    st.markdown(
+                        f"""
+                        <div style="font-size:11px; line-height:13px; margin-top:-2px;">
+                            <b>{r['wind']}{gust_text}</b> · RWY {html.escape(str(r['runway']))} · {r['length']} ft<br>
+                            <span style="color:#cfcfcf;">{airport_short}</span>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+                if selected:
+                    render_history_panel(
+                        r["icao"],
+                        runway_ends_by_icao,
+                        min_len,
+                        title="Past 24 Hours",
+                        phone=phone,
+                        side_by_side_charts=side_by_side_charts,
+                    )
+
+            continue
+
+        card_height = 46 if compact else 54
+        cw_font = 23 if compact else 26
+        gust_font = 13 if compact else 16
+        label_font = 8 if compact else 9
+        row_num_font = 12 if compact else 14
+        row_num_pad = 12 if compact else 18
 
         with st.container(border=True):
-            if phone:
-                cols = st.columns([0.28, 1.05, 0.82, 0.72, 1.15])
-            elif compact:
-                cols = st.columns([0.35, 1.2, 0.9, 0.85, 1.15])
+            if compact:
+                cols = st.columns([0.30, 1.05, 0.78, 0.75, 1.35], gap="small")
             else:
                 cols = st.columns([0.35, 1.35, 0.95, 0.8, 1.05, 0.7, 2.35])
 
@@ -820,9 +906,9 @@ def render_rows(rows, runway_ends_by_icao, min_len, compact=False, phone=False, 
                 gust_block = ""
                 if r.get("gust_cw") is not None:
                     gust_block = f"""
-                    <div style="border-left:1px solid rgba(255,255,255,0.25); padding-left:10px; margin-left:8px; text-align:center;">
+                    <div style="border-left:1px solid rgba(255,255,255,0.25); padding-left:8px; margin-left:7px; text-align:center;">
                         <div style="font-size:{gust_font}px; line-height:{gust_font}px; font-weight:950; color:#ffffff;">{r['gust_cw']}</div>
-                        <div style="font-size:8px; color:#dcdcdc; font-weight:900; letter-spacing:.3px;">GUST</div>
+                        <div style="font-size:7px; color:#dcdcdc; font-weight:900; letter-spacing:.3px;">GUST</div>
                     </div>
                     """
 
@@ -831,17 +917,17 @@ def render_rows(rows, runway_ends_by_icao, min_len, compact=False, phone=False, 
                     <div style="
                         border:1px solid {color_hex};
                         background:{color_hex}22;
-                        border-radius:13px;
+                        border-radius:12px;
                         height:{card_height}px;
                         display:flex;
                         justify-content:center;
                         align-items:center;
                         box-sizing:border-box;
-                        margin-top:2px;
-                        margin-bottom:2px;
+                        margin-top:1px;
+                        margin-bottom:1px;
                     ">
                         <div style="text-align:center;">
-                            <div style="font-size:{cw_font}px; line-height:{cw_font}px; font-weight:950; color:{color_hex};">{r["cw"]}</div>
+                            <div style="font-size:{cw_font}px; line-height:{cw_font}px; font-weight:950; color:{color_hex};">{r['cw']}</div>
                             <div style="font-size:{label_font}px; color:#f1f1f1; font-weight:900; letter-spacing:.4px;">KT XWIND</div>
                         </div>
                         {gust_block}
@@ -851,21 +937,21 @@ def render_rows(rows, runway_ends_by_icao, min_len, compact=False, phone=False, 
                 )
 
             with cols[2]:
-                label = f"{r['icao']} ▼"
                 st.button(
-                    label,
+                    f"{r['icao']} ▾",
                     key=f"select_{r['icao']}_{i}_{'compact' if compact else 'wide'}",
                     on_click=row_click,
                     args=(r["icao"],),
                     use_container_width=True,
                 )
 
-            if compact or phone:
+            if compact:
                 with cols[3]:
                     gust_text = f"G{r['gust']}" if r.get("gust") is not None else ""
-                    st.markdown(f"**Wind**  \n{r['wind']}{gust_text}")
+                    st.markdown(f"<div style='font-size:12px; line-height:14px;'><b>Wind</b><br>{r['wind']}{gust_text}</div>", unsafe_allow_html=True)
                 with cols[4]:
-                    st.markdown(f"**RWY {html.escape(str(r['runway']))}** ({r['length']} ft)  \n{airport_name_with_elevation(r)}")
+                    airport_short = airport_name_with_elevation(r)
+                    st.markdown(f"<div style='font-size:12px; line-height:14px;'><b>RWY {html.escape(str(r['runway']))}</b> ({r['length']} ft)<br>{airport_short}</div>", unsafe_allow_html=True)
             else:
                 with cols[3]:
                     gust_text = f"G{r['gust']}" if r.get("gust") is not None else ""
@@ -881,11 +967,17 @@ def render_rows(rows, runway_ends_by_icao, min_len, compact=False, phone=False, 
                     st.markdown(
                         f"**{airport_name_with_elevation(r)}**  \n"
                         f"{html.escape(str(r['city']))}, {html.escape(str(r['country']))}"
-                )
+                    )
 
             if selected:
-                render_history_panel(r["icao"], runway_ends_by_icao, min_len, title="Past 24 Hours", phone=phone, side_by_side_charts=side_by_side_charts)
-
+                render_history_panel(
+                    r["icao"],
+                    runway_ends_by_icao,
+                    min_len,
+                    title="Past 24 Hours",
+                    phone=phone,
+                    side_by_side_charts=side_by_side_charts,
+                )
 
 def make_runway_line(row, distance_nm=8):
     if row.get("heading") in (None, "—") or pd.isna(row.get("lat")) or pd.isna(row.get("lon")):
@@ -1175,19 +1267,22 @@ if "min_len" not in st.session_state:
 if "top_n" not in st.session_state:
     st.session_state.top_n = 30
 if "layout_mode" not in st.session_state:
-    st.session_state.layout_mode = "Stacked" if is_phone else "Wide"
+    st.session_state.layout_mode = preferred_layout_mode
 if "use_global" not in st.session_state:
     st.session_state.use_global = False
 
 
-def render_top_header_controls(phone=False):
+def render_top_header_controls(phone=False, tablet=False):
     st.markdown(
         """
         <style>
             div[data-testid="stSlider"] { padding-top: 0rem; padding-bottom: 0rem; }
             div[data-testid="stRadio"] { padding-top: 0rem; padding-bottom: 0rem; }
-            div[data-testid="stCheckbox"] { padding-top: 0.15rem; padding-bottom: 0rem; }
-            div[data-testid="stButton"] { padding-top: 0.20rem; }
+            div[data-testid="stCheckbox"] { padding-top: 0.05rem; padding-bottom: 0rem; }
+            div[data-testid="stButton"] { padding-top: 0.05rem; }
+            div[role="radiogroup"] { flex-direction: row !important; gap: 0.35rem !important; flex-wrap: nowrap !important; }
+            div[role="radiogroup"] label { white-space: nowrap !important; padding-right: 0.15rem !important; }
+            div[data-testid="stCheckbox"] label { white-space: nowrap !important; }
             .compact-label {
                 color: #aaa;
                 font-size: 10px;
@@ -1200,13 +1295,24 @@ def render_top_header_controls(phone=False):
             .last-updated {
                 text-align: right;
                 color: #aaa;
-                font-size: 12px;
+                font-size: 11px;
                 margin-top: -8px;
                 margin-bottom: 0px;
             }
             .phone-title h1 {
-                font-size: 1.35rem !important;
-                line-height: 1.2 !important;
+                font-size: 1.25rem !important;
+                line-height: 1.15 !important;
+                margin-bottom: 0.15rem !important;
+            }
+            .tablet-title h1 {
+                font-size: 1.65rem !important;
+                line-height: 1.15 !important;
+            }
+            @media (max-width: 760px) {
+                .block-container { padding-left: 0.55rem !important; padding-right: 0.55rem !important; padding-top: 0.75rem !important; }
+                div[data-testid="stMarkdownContainer"] p { font-size: 0.82rem; }
+                button[kind="secondary"] { padding: 0.20rem 0.30rem !important; min-height: 1.75rem !important; font-size: 0.75rem !important; }
+                div[data-testid="stVerticalBlock"] { gap: 0.25rem !important; }
             }
         </style>
         """,
@@ -1214,54 +1320,82 @@ def render_top_header_controls(phone=False):
     )
 
     if phone:
-        c1, c2 = st.columns([1.1, 0.85], gap="small")
-        c3, c4, c5 = st.columns([1.0, 0.7, 0.7], gap="small")
+        c1, c2 = st.columns([1.05, 0.95], gap="small")
+        with c1:
+            st.markdown("<div class='compact-label'>RUNWAY</div>", unsafe_allow_html=True)
+            min_len_value = st.slider(
+                "Min runway length",
+                min_value=0,
+                max_value=12000,
+                value=st.session_state.min_len,
+                step=500,
+                label_visibility="collapsed",
+                key="min_len_header",
+            )
+        with c2:
+            st.markdown("<div class='compact-label'>RESULTS</div>", unsafe_allow_html=True)
+            top_n_value = st.slider(
+                "Results",
+                min_value=5,
+                max_value=100,
+                value=st.session_state.top_n,
+                step=5,
+                label_visibility="collapsed",
+                key="top_n_header",
+            )
+
+        c3, c4 = st.columns([1.25, 0.75], gap="small")
+        with c3:
+            layout_value = st.radio(
+                "Layout",
+                ["Wide", "Stacked"],
+                horizontal=True,
+                label_visibility="collapsed",
+                index=1,
+                key="layout_header",
+            )
+        with c4:
+            global_value = st.checkbox("Global", value=st.session_state.use_global, key="global_header")
+        refresh_value = st.button("Refresh METARs", key="refresh_header", use_container_width=True)
+
     else:
-        c1, c2, c3, c4, c5 = st.columns([1.1, 0.85, 1.0, 0.7, 0.7], gap="small")
-
-    with c1:
-        st.markdown("<div class='compact-label'>RUNWAY</div>", unsafe_allow_html=True)
-        min_len_value = st.slider(
-            "Min runway length",
-            min_value=0,
-            max_value=12000,
-            value=st.session_state.min_len,
-            step=500,
-            label_visibility="collapsed",
-            key="min_len_header",
-        )
-
-    with c2:
-        st.markdown("<div class='compact-label'>RESULTS</div>", unsafe_allow_html=True)
-        top_n_value = st.slider(
-            "Results",
-            min_value=5,
-            max_value=100,
-            value=st.session_state.top_n,
-            step=5,
-            label_visibility="collapsed",
-            key="top_n_header",
-        )
-
-    with c3:
-        layout_value = st.radio(
-            "Layout",
-            ["Wide", "Stacked"],
-            horizontal=True,
-            label_visibility="collapsed",
-            index=0 if st.session_state.layout_mode == "Wide" else 1,
-            key="layout_header",
-        )
-
-    with c4:
-        global_value = st.checkbox(
-            "Global",
-            value=st.session_state.use_global,
-            key="global_header",
-        )
-
-    with c5:
-        refresh_value = st.button("Refresh", key="refresh_header", use_container_width=True)
+        # Wider weights prevent iPad/Safari from wrapping Wide/Stacked/Global/Refresh vertically.
+        c1, c2, c3, c4, c5 = st.columns([1.0, 0.82, 1.38, 0.82, 0.95], gap="small")
+        with c1:
+            st.markdown("<div class='compact-label'>RUNWAY</div>", unsafe_allow_html=True)
+            min_len_value = st.slider(
+                "Min runway length",
+                min_value=0,
+                max_value=12000,
+                value=st.session_state.min_len,
+                step=500,
+                label_visibility="collapsed",
+                key="min_len_header",
+            )
+        with c2:
+            st.markdown("<div class='compact-label'>RESULTS</div>", unsafe_allow_html=True)
+            top_n_value = st.slider(
+                "Results",
+                min_value=5,
+                max_value=100,
+                value=st.session_state.top_n,
+                step=5,
+                label_visibility="collapsed",
+                key="top_n_header",
+            )
+        with c3:
+            layout_value = st.radio(
+                "Layout",
+                ["Wide", "Stacked"],
+                horizontal=True,
+                label_visibility="collapsed",
+                index=0 if st.session_state.layout_mode == "Wide" else 1,
+                key="layout_header",
+            )
+        with c4:
+            global_value = st.checkbox("Global", value=st.session_state.use_global, key="global_header")
+        with c5:
+            refresh_value = st.button("Refresh", key="refresh_header", use_container_width=True)
 
     st.markdown(
         f"<div class='last-updated'>Last updated: {last_updated_text}</div>",
@@ -1275,15 +1409,22 @@ if is_phone:
     st.markdown('<div class="phone-title">', unsafe_allow_html=True)
     st.title("Crosswind and Weather History")
     st.markdown('</div>', unsafe_allow_html=True)
-    st.caption("Tap an ICAO ▼ to expand weather history.")
+    st.caption("Tap an ICAO ▾ to expand weather history.")
     min_len, top_n, layout_mode, use_global, refresh = render_top_header_controls(phone=True)
+elif is_tablet:
+    header_left, header_right = st.columns([0.85, 2.15], gap="small")
+    with header_left:
+        st.markdown('<div class="tablet-title">', unsafe_allow_html=True)
+        st.title("Crosswind and Weather History")
+        st.markdown('</div>', unsafe_allow_html=True)
+        st.caption("Tap ICAO ▾ for history.")
+    with header_right:
+        min_len, top_n, layout_mode, use_global, refresh = render_top_header_controls(phone=False, tablet=True)
 else:
-    header_left, header_right = st.columns([2, 1])
-
+    header_left, header_right = st.columns([1.55, 1.45], gap="small")
     with header_left:
         st.title("Crosswind and Weather History")
-        st.caption("Crosswinds color-coded by strength. Click an ICAO ▼ or search airport to zoom the map.")
-
+        st.caption("Crosswinds color-coded by strength. Click an ICAO ▾ or search airport to zoom the map.")
     with header_right:
         min_len, top_n, layout_mode, use_global, refresh = render_top_header_controls(phone=False)
 
@@ -1292,19 +1433,25 @@ st.session_state.top_n = top_n
 st.session_state.layout_mode = layout_mode
 st.session_state.use_global = use_global
 
-# Responsive behavior based on viewport width. Phone always uses stacked compact layout.
+# Responsive behavior based on viewport width.
+# Phone and narrow tablet load stacked. iPad landscape / desktop load wide.
 if is_phone:
     layout_mode = "Stacked"
-    map_height = 350
+    map_height = 330
     compact_rows = True
     side_by_side_charts = False
     row_window_height = None
 elif is_tablet:
-    map_height = 500
+    if screen_width is not None and screen_width < 980:
+        layout_mode = "Stacked"
+    else:
+        layout_mode = "Wide"
+    map_height = 470 if layout_mode == "Stacked" else 540
     compact_rows = True
     side_by_side_charts = True
-    row_window_height = 780
+    row_window_height = 820
 else:
+    layout_mode = "Wide" if screen_width is None else layout_mode
     map_height = 650
     compact_rows = False
     side_by_side_charts = True
