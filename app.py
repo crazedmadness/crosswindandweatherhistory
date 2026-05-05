@@ -1649,7 +1649,7 @@ st.session_state.use_global = use_global
 # Phone and narrow tablet load stacked. iPad landscape / desktop load wide.
 if is_phone:
     layout_mode = "Stacked"
-    map_height = 300
+    map_height = int((screen_width or 360) * 0.33)  # ~1/3 of screen width
     compact_rows = True
     side_by_side_charts = False
     row_window_height = None
