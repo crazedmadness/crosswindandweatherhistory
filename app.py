@@ -7,6 +7,7 @@ import pydeck as pdk
 import altair as alt
 import streamlit.components.v1 as components
 from zoneinfo import ZoneInfo
+from pathlib import Path
 
 try:
     from streamlit_js_eval import streamlit_js_eval
@@ -69,6 +70,53 @@ is_phone = screen_width is not None and screen_width < 760
 is_tablet = screen_width is not None and 760 <= screen_width < 1180
 is_desktop = screen_width is None or screen_width >= 1180
 preferred_layout_mode = "Stacked" if (screen_width is not None and screen_width < 980) else "Wide"
+
+HEADER_IMAGE_BASENAME = "e4d83345-7cf9-43df-910b-1f29eef9215a"
+
+
+def get_header_image_path():
+    """Find the banner image even if the extension differs."""
+    candidates = [
+        HEADER_IMAGE_BASENAME,
+        f"{HEADER_IMAGE_BASENAME}.png",
+        f"{HEADER_IMAGE_BASENAME}.jpg",
+        f"{HEADER_IMAGE_BASENAME}.jpeg",
+        f"{HEADER_IMAGE_BASENAME}.webp",
+    ]
+
+    for candidate in candidates:
+        if Path(candidate).exists():
+            return candidate
+
+    return None
+
+
+def render_header_image():
+    """Render the logo/banner at the top in place of the old text title."""
+    image_path = get_header_image_path()
+
+    st.markdown(
+        """
+        <style>
+            .block-container { padding-top: 0.55rem; }
+            div[data-testid="stImage"] { margin-bottom: 0.18rem; }
+            div[data-testid="stImage"] img { border-radius: 10px; }
+            @media (max-width: 760px) {
+                .block-container { padding-top: 0.30rem !important; }
+                div[data-testid="stImage"] img { border-radius: 7px; }
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if image_path:
+        st.image(image_path, use_container_width=True)
+    else:
+        st.warning(
+            f"Header image not found. Add {HEADER_IMAGE_BASENAME}.png to the same folder as app.py."
+        )
+
 
 def get_color(cw):
     if cw is None or pd.isna(cw):
@@ -1472,26 +1520,21 @@ def render_top_header_controls(phone=False, tablet=False):
     return min_len_value, top_n_value, layout_value, global_value, refresh_value
 
 
+render_header_image()
+
 if is_phone:
-    st.markdown('<div class="phone-title">', unsafe_allow_html=True)
-    st.title("Crosswind and Weather History")
-    st.markdown('</div>', unsafe_allow_html=True)
     min_len, top_n, layout_mode, use_global, refresh = render_top_header_controls(phone=True)
 elif is_tablet:
-    header_left, header_right = st.columns([1.55, 0.75], gap="small")
-    with header_left:
-        st.markdown('<div class="tablet-title">', unsafe_allow_html=True)
-        st.title("Crosswind and Weather History")
-        st.markdown('</div>', unsafe_allow_html=True)
+    controls_left, controls_right = st.columns([1.7, 0.75], gap="small")
+    with controls_left:
         st.caption("Tap ICAO ▾ for history.")
-    with header_right:
+    with controls_right:
         min_len, top_n, layout_mode, use_global, refresh = render_top_header_controls(phone=False, tablet=True)
 else:
-    header_left, header_right = st.columns([2.35, 0.65], gap="small")
-    with header_left:
-        st.title("Crosswind and Weather History")
+    controls_left, controls_right = st.columns([2.35, 0.65], gap="small")
+    with controls_left:
         st.caption("Crosswinds color-coded by strength. Click an ICAO ▾ or search airport to zoom the map.")
-    with header_right:
+    with controls_right:
         min_len, top_n, layout_mode, use_global, refresh = render_top_header_controls(phone=False)
 
 st.session_state.min_len = min_len
