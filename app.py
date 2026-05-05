@@ -896,22 +896,45 @@ def render_rows(rows, runway_ends_by_icao, min_len, compact=False, phone=False, 
                     </div>
                     <div style="
                         display:grid;
-                        grid-template-columns: 32% 35% 33%;
-                        column-gap:4px;
+                        grid-template-columns: 43% 57%;
+                        column-gap:5px;
                         color:#d8d8d8;
-                        font-size:10px;
-                        line-height:12px;
+                        font-size:9.5px;
+                        line-height:11px;
                         padding-top:4px;
                         overflow:hidden;
                     ">
                         <div><b>{html.escape(str(r['wind']))}{gust_text}</b></div>
                         <div>RWY {html.escape(str(r['runway']))} · {r['length']} ft</div>
-                        <div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{airport_short}</div>
+                    </div>
+                    <div style="
+                        color:#f1f1f1;
+                        font-size:10.5px;
+                        line-height:12px;
+                        padding-top:3px;
+                        font-weight:800;
+                        display:-webkit-box;
+                        -webkit-line-clamp:2;
+                        -webkit-box-orient:vertical;
+                        overflow:hidden;
+                    ">
+                        {html.escape(str(r.get('name', '—')))}
+                    </div>
+                    <div style="
+                        color:#bdbdbd;
+                        font-size:9.5px;
+                        line-height:11px;
+                        padding-top:1px;
+                        white-space:nowrap;
+                        overflow:hidden;
+                        text-overflow:ellipsis;
+                    ">
+                        {html.escape(str(r.get('city', '—')))}, {html.escape(str(r.get('country', '—')))}
                     </div>
                 </div>
             </a>
             """
-            render_raw_html(card_html, height=88)
+            render_raw_html(card_html, height=112)
 
             if selected:
                 render_history_panel(
@@ -1320,49 +1343,94 @@ def render_top_header_controls(phone=False, tablet=False):
         <style>
             div[data-testid="stSlider"] { padding-top: 0rem; padding-bottom: 0rem; }
             div[data-testid="stRadio"] { padding-top: 0rem; padding-bottom: 0rem; }
-            div[data-testid="stCheckbox"] { padding-top: 0.05rem; padding-bottom: 0rem; }
-            div[data-testid="stButton"] { padding-top: 0.05rem; }
-            div[role="radiogroup"] { flex-direction: row !important; gap: 0.35rem !important; flex-wrap: nowrap !important; }
-            div[role="radiogroup"] label { white-space: nowrap !important; padding-right: 0.15rem !important; }
-            div[data-testid="stCheckbox"] label { white-space: nowrap !important; }
+            div[data-testid="stCheckbox"] { padding-top: 0rem; padding-bottom: 0rem; }
+            div[data-testid="stButton"] { padding-top: 0rem; }
+            div[role="radiogroup"] { flex-direction: row !important; gap: 0.20rem !important; flex-wrap: nowrap !important; }
+            div[role="radiogroup"] label { white-space: nowrap !important; padding: 0rem 0.05rem !important; font-size: 0.72rem !important; }
+            div[data-testid="stCheckbox"] label { white-space: nowrap !important; font-size: 0.72rem !important; }
+            div[data-testid="stPopover"] button { padding: 0.12rem 0.25rem !important; min-height: 1.45rem !important; font-size: 0.68rem !important; }
+            button[kind="secondary"] { padding: 0.12rem 0.25rem !important; min-height: 1.45rem !important; font-size: 0.70rem !important; }
             .last-updated {
                 text-align: right;
                 color: #aaa;
-                font-size: 11px;
+                font-size: 10.5px;
                 margin-top: -4px;
                 margin-bottom: 0px;
             }
             .phone-title h1 {
-                font-size: 1.18rem !important;
-                line-height: 1.12 !important;
-                margin-bottom: 0.10rem !important;
+                font-size: 1.12rem !important;
+                line-height: 1.08 !important;
+                margin-bottom: 0.05rem !important;
             }
             .tablet-title h1 {
-                font-size: 1.45rem !important;
-                line-height: 1.12 !important;
+                font-size: 1.32rem !important;
+                line-height: 1.08 !important;
             }
-            .toolbar-small button {
-                white-space: nowrap !important;
+            .mobile-options-summary {
+                color:#aaa;
+                font-size:10.5px;
+                text-align:right;
+                margin-top:-3px;
             }
             @media (max-width: 760px) {
-                .block-container { padding-left: 0.45rem !important; padding-right: 0.45rem !important; padding-top: 0.55rem !important; }
-                div[data-testid="stMarkdownContainer"] p { font-size: 0.78rem; }
-                button[kind="secondary"] { padding: 0.18rem 0.24rem !important; min-height: 1.65rem !important; font-size: 0.72rem !important; }
-                div[data-testid="stVerticalBlock"] { gap: 0.20rem !important; }
+                .block-container { padding-left: 0.38rem !important; padding-right: 0.38rem !important; padding-top: 0.38rem !important; }
+                div[data-testid="stMarkdownContainer"] p { font-size: 0.74rem; }
+                div[data-testid="stVerticalBlock"] { gap: 0.16rem !important; }
             }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    # Sliders live inside compact popovers so the header stays horizontal on phone/iPad/desktop.
-    c1, c2, c3, c4, c5 = st.columns(
-        [0.86, 0.80, 1.34, 0.72, 0.78] if not phone else [0.82, 0.78, 1.18, 0.66, 0.72],
-        gap="small",
-    )
+    default_layout = "Stacked" if phone or (screen_width is not None and screen_width < 980) else st.session_state.layout_mode
+
+    if phone:
+        # Keep mobile controls collapsed so the map starts near the top.
+        with st.expander("Options", expanded=False):
+            c1, c2 = st.columns(2, gap="small")
+            with c1:
+                min_len_value = st.slider(
+                    "Runway ft",
+                    min_value=0,
+                    max_value=12000,
+                    value=st.session_state.min_len,
+                    step=500,
+                    key="min_len_header",
+                )
+            with c2:
+                top_n_value = st.slider(
+                    "Rows",
+                    min_value=5,
+                    max_value=100,
+                    value=st.session_state.top_n,
+                    step=5,
+                    key="top_n_header",
+                )
+            c3, c4, c5 = st.columns([1.15, 0.75, 0.65], gap="small")
+            with c3:
+                layout_value = st.radio(
+                    "Layout",
+                    ["Wide", "Stacked"],
+                    horizontal=True,
+                    label_visibility="collapsed",
+                    index=0 if default_layout == "Wide" else 1,
+                    key="layout_header",
+                )
+            with c4:
+                global_value = st.checkbox("Global", value=st.session_state.use_global, key="global_header")
+            with c5:
+                refresh_value = st.button("↻", key="refresh_header", use_container_width=True)
+        st.markdown(
+            f"<div class='mobile-options-summary'>Last updated: {last_updated_text}</div>",
+            unsafe_allow_html=True,
+        )
+        return min_len_value, top_n_value, layout_value, global_value, refresh_value
+
+    # Tablet/desktop: a single short horizontal toolbar.
+    c1, c2, c3, c4, c5 = st.columns([0.72, 0.68, 1.24, 0.60, 0.62], gap="small")
 
     with c1:
-        with st.popover(f"Runway ▾", use_container_width=True):
+        with st.popover("Runway", use_container_width=True):
             min_len_value = st.slider(
                 "Min runway length",
                 min_value=0,
@@ -1372,7 +1440,7 @@ def render_top_header_controls(phone=False, tablet=False):
                 key="min_len_header",
             )
     with c2:
-        with st.popover("Results ▾", use_container_width=True):
+        with st.popover("Rows", use_container_width=True):
             top_n_value = st.slider(
                 "Results",
                 min_value=5,
@@ -1382,7 +1450,6 @@ def render_top_header_controls(phone=False, tablet=False):
                 key="top_n_header",
             )
     with c3:
-        default_layout = "Stacked" if phone or (screen_width is not None and screen_width < 980) else st.session_state.layout_mode
         layout_value = st.radio(
             "Layout",
             ["Wide", "Stacked"],
@@ -1394,7 +1461,7 @@ def render_top_header_controls(phone=False, tablet=False):
     with c4:
         global_value = st.checkbox("Global", value=st.session_state.use_global, key="global_header")
     with c5:
-        refresh_value = st.button("Refresh" if not phone else "↻", key="refresh_header", use_container_width=True)
+        refresh_value = st.button("Refresh" if not tablet else "↻", key="refresh_header", use_container_width=True)
 
     st.markdown(
         f"<div class='last-updated'>Last updated: {last_updated_text}</div>",
@@ -1408,10 +1475,9 @@ if is_phone:
     st.markdown('<div class="phone-title">', unsafe_allow_html=True)
     st.title("Crosswind and Weather History")
     st.markdown('</div>', unsafe_allow_html=True)
-    st.caption("Tap an ICAO ▾ to expand weather history.")
     min_len, top_n, layout_mode, use_global, refresh = render_top_header_controls(phone=True)
 elif is_tablet:
-    header_left, header_right = st.columns([0.80, 2.20], gap="small")
+    header_left, header_right = st.columns([0.95, 2.05], gap="small")
     with header_left:
         st.markdown('<div class="tablet-title">', unsafe_allow_html=True)
         st.title("Crosswind and Weather History")
@@ -1436,7 +1502,7 @@ st.session_state.use_global = use_global
 # Phone and narrow tablet load stacked. iPad landscape / desktop load wide.
 if is_phone:
     layout_mode = "Stacked"
-    map_height = 330
+    map_height = 300
     compact_rows = True
     side_by_side_charts = False
     row_window_height = None
