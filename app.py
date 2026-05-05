@@ -29,7 +29,7 @@ if "selected_airport_result" not in st.session_state:
     st.session_state.selected_airport_result = None
 
 if "history_mode" not in st.session_state:
-    # Scrubber is always visible. This controls whether hourly cache is active.
+    # Scrubber is visible by default, but 24h cached-history mode starts OFF.
     st.session_state.history_mode = False
 
 if "history_slider_pos" not in st.session_state:
@@ -1293,6 +1293,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                     agePill.textContent = item.offset === 0 ? "CURRENT" : `${{item.offset}}H AGO`;
                     utcLabel.textContent = item.utc;
                     localLabel.textContent = item.local;
+                    insideToggle.classList.toggle("off", !historyActive);
                     [...rail.children].forEach(chip => {{
                         chip.classList.toggle("active", Number(chip.dataset.offset) === Number(selectedOffset));
                     }});
@@ -2628,13 +2629,15 @@ def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_b
 
 
 def apply_history_mode_results(history_enabled, hour_offset, live_results):
-    """Return live results or a prebuilt hourly snapshot.
-
-    When 24h is off, the scrubber remains visible but the rows/map stay live.
-    When 24h is clicked on, this builds the full hourly cache once.
-    """
+    """Return live rows while 24h is off; return cached hourly rows while on."""
     if "history_snapshot_cache" not in st.session_state:
         st.session_state.history_snapshot_cache = {}
+
+    try:
+        hour_offset = int(hour_offset)
+    except Exception:
+        hour_offset = 0
+    hour_offset = max(0, min(23, hour_offset))
 
     if not history_enabled:
         return live_results, {
@@ -2659,15 +2662,15 @@ def apply_history_mode_results(history_enabled, hour_offset, live_results):
             )
 
     snapshots = bundle.get("snapshots", {})
-    rows = snapshots.get(int(hour_offset), [])
+    rows = snapshots.get(hour_offset, [])
 
-    if not rows and int(hour_offset) <= 0:
-        rows = live_results
+    if not rows and hour_offset <= 0:
+        rows = snapshots.get(0, live_results)
 
     if not rows:
         available = [h for h, r in snapshots.items() if r]
         if available:
-            nearest = min(available, key=lambda h: abs(int(h) - int(hour_offset)))
+            nearest = min(available, key=lambda h: abs(int(h) - hour_offset))
             rows = snapshots.get(nearest, [])
 
     rows = enrich_snapshot_rows_with_airport_metadata(rows, airport_lookup)
