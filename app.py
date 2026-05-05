@@ -29,9 +29,8 @@ if "selected_airport_result" not in st.session_state:
     st.session_state.selected_airport_result = None
 
 if "history_mode" not in st.session_state:
-    # Show the 24h timeline UI by default. The expensive history cache still
-    # builds only when the selected hour is not current.
-    st.session_state.history_mode = True
+    # Scrubber is always visible. This controls whether the 24h cache is loaded/active.
+    st.session_state.history_mode = False
 
 if "history_slider_pos" not in st.session_state:
     # Slider position is 0 = 23 hours ago, 23 = current/right side.
@@ -944,7 +943,7 @@ def render_history_time_badge(hour_offset, timezone_name="America/Los_Angeles"):
     """
 
 
-def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Angeles", phone=False, key_prefix="timeline"):
+def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Angeles", phone=False, key_prefix="timeline", active=False):
     """Render a custom JS timeline scrubber with a fixed center marker.
 
     The timeline slides behind the center marker. It updates Streamlit by
@@ -977,6 +976,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
     import json
     payload = json.dumps(labels)
     selected_json = json.dumps(hour_offset)
+    active_json = json.dumps(bool(active))
     height = 104 if phone else 106
 
     components.html(
@@ -1229,7 +1229,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
         </head>
         <body>
             <div class="shell">
-                <button class="inside-toggle" id="insideToggle" title="Turn off 24 hour history">
+                <button class="inside-toggle" id="insideToggle" title="Toggle 24 hour history">
                     <span class="knob"></span><span>24h</span>
                 </button>
                 <div class="top">
@@ -1255,6 +1255,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
             <script>
                 const labels = {payload};
                 let selectedOffset = {selected_json};
+                let historyActive = {active_json};
                 const chipW = window.innerWidth <= 760 ? 62 : 76;
                 const rail = document.getElementById("rail");
                 const viewport = document.getElementById("viewport");
@@ -1399,8 +1400,12 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
     )
 
 
-def render_history_slider_controls(title_text, phone=False):
-    """Top-of-list time-machine switch + custom elastic timeline scrubber."""
+def render_history_slider_controls(title_text, phone=False, show_title=True):
+    """Top-of-list custom timeline scrubber.
+
+    The scrubber is always visible. The 24h button inside the scrubber toggles
+    cache/history mode. Dragging or clicking the timeline also turns history on.
+    """
     timezone_name = get_viewer_timezone()
 
     # Read selected state from URL params written by the custom JS scrubber.
@@ -1430,21 +1435,21 @@ def render_history_slider_controls(title_text, phone=False):
             }
             .xwind-list-title {
                 font-size: 1.28rem;
-                line-height: 1.15;
+                line-height: 1.05;
                 font-weight: 900;
-                margin: 0.1rem 0 0.05rem 0;
+                margin: 0rem 0 0.05rem 0;
             }
-            div[data-testid="stToggle"] label {
-                font-size: 0.78rem !important;
-                font-weight: 900 !important;
+            .global-under-title {
+                margin-top:-2px;
+                margin-bottom:2px;
+            }
+            .global-under-title div[data-testid="stCheckbox"] label {
+                font-size: 0.76rem !important;
+                font-weight: 850 !important;
                 white-space: nowrap !important;
             }
-            div[data-testid="stToggle"] [data-baseweb="checkbox"] {
-                border-color: var(--xwind-teal-mid) !important;
-            }
             @media (max-width: 760px) {
-                .xwind-list-title { font-size: 1rem; padding-top:3px; }
-                div[data-testid="stToggle"] label { font-size:0.72rem !important; }
+                .xwind-list-title { font-size: 1rem; padding-top:0px; }
             }
         </style>
         """,
@@ -1454,44 +1459,20 @@ def render_history_slider_controls(title_text, phone=False):
     history_enabled = bool(st.session_state.get("history_mode", False))
     hour_offset = int(st.session_state.get("history_hour_offset", 0))
 
-    if phone:
-        if history_enabled:
-            st.markdown(f"<div class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
-            render_history_timeline_scrubber(hour_offset, timezone_name=timezone_name, phone=True, key_prefix="phone")
-        else:
-            c_title, c_toggle = st.columns([1.6, 0.95], gap="small")
-            with c_title:
-                st.markdown(f"<div class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
-            with c_toggle:
-                history_enabled = st.toggle("24h", value=False, key="history_mode_toggle_phone")
-    else:
-        if history_enabled:
-            c_title, c_slider = st.columns([0.95, 2.59], gap="small")
-            with c_title:
-                st.markdown(f"<div class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
-            with c_slider:
-                render_history_timeline_scrubber(hour_offset, timezone_name=timezone_name, phone=False, key_prefix="wide")
-        else:
-            c_title, c_toggle, c_slider = st.columns([0.95, 0.24, 2.35], gap="small")
-            with c_title:
-                st.markdown(f"<div class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
-            with c_toggle:
-                history_enabled = st.toggle("24h", value=False, key="history_mode_toggle")
-            with c_slider:
-                st.markdown("<div style='height:44px;'></div>", unsafe_allow_html=True)
+    if show_title:
+        st.markdown(f"<div class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
+
+    render_history_timeline_scrubber(
+        hour_offset,
+        timezone_name=timezone_name,
+        phone=phone,
+        key_prefix="phone" if phone else "wide",
+        active=history_enabled,
+    )
 
     st.session_state.history_mode = history_enabled
     st.session_state.history_hour_offset = hour_offset
     st.session_state.history_slider_pos = 23 - hour_offset
-
-    # When enabled by the Streamlit toggle, put mode in the URL so timeline updates preserve it.
-    if history_enabled:
-        try:
-            if str(st.query_params.get("history_mode", "")) != "1":
-                st.query_params["history_mode"] = "1"
-                st.query_params["history_hour"] = str(hour_offset)
-        except Exception:
-            pass
 
     return history_enabled, hour_offset
 
@@ -2303,6 +2284,9 @@ if "layout_mode" not in st.session_state:
 if "use_global" not in st.session_state:
     st.session_state.use_global = False
 
+if "global_toggle_top" not in st.session_state:
+    st.session_state.global_toggle_top = st.session_state.use_global
+
 
 # Bump this when the cached time-slider row shape changes.
 HISTORY_SNAPSHOT_CACHE_VERSION = "2026-05-05-hourly-candidate-slider-v5"
@@ -2400,7 +2384,7 @@ def render_top_header_controls(phone=False, tablet=False):
                     key="layout_header",
                 )
             with c4:
-                global_value = st.checkbox("Global", value=st.session_state.use_global, key="global_header")
+                global_value = st.session_state.use_global
             with c5:
                 refresh_value = st.button("↻", key="refresh_header", use_container_width=True)
         st.markdown(
@@ -2441,7 +2425,7 @@ def render_top_header_controls(phone=False, tablet=False):
                 key="layout_header",
             )
         with c4:
-            global_value = st.checkbox("Global", value=st.session_state.use_global, key="global_header")
+            global_value = st.session_state.use_global
         with c5:
             refresh_value = st.button("Refresh" if not tablet else "↻", key="refresh_header", use_container_width=True)
 
@@ -2460,13 +2444,13 @@ if is_phone:
 elif is_tablet:
     controls_left, controls_right = st.columns([1.7, 0.75], gap="small")
     with controls_left:
-        st.caption("Tap ICAO ▾ for history.")
+        st.empty()
     with controls_right:
         min_len, top_n, layout_mode, use_global, refresh = render_top_header_controls(phone=False, tablet=True)
 else:
     controls_left, controls_right = st.columns([2.35, 0.65], gap="small")
     with controls_left:
-        st.caption("Crosswinds color-coded by strength. Click an ICAO ▾ or search airport to zoom the map.")
+        st.empty()
     with controls_right:
         min_len, top_n, layout_mode, use_global, refresh = render_top_header_controls(phone=False)
 
@@ -2637,21 +2621,16 @@ def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_b
 def apply_history_mode_results(history_enabled, hour_offset, live_results):
     """Return live results or a prebuilt hourly snapshot.
 
-    Timeline UI can be visible by default without immediately building the
-    24-hour cache. Cache builds only after the user picks a past hour.
+    The scrubber can be visible without loading history. Once the built-in 24h
+    button is on, build the cache immediately and use the selected hourly list.
     """
     if not history_enabled:
-        return live_results, None
-
-    # Current/right side should behave exactly like live mode and avoid the
-    # expensive 24h history build until the user actually scrubs backward.
-    if int(hour_offset) <= 0:
         return live_results, {
             "snapshots": {0: live_results},
             "candidate_icaos": [r.get("icao") for r in live_results if r.get("icao")],
             "candidate_pool_size": len(live_results),
             "built_at_utc": pd.Timestamp.now(tz="UTC"),
-            "live_current": True,
+            "inactive_preview": True,
         }
 
     key = history_cache_key(active_icaos, use_global, min_wind, min_len, top_n)
@@ -2668,6 +2647,9 @@ def apply_history_mode_results(history_enabled, hour_offset, live_results):
     snapshots = bundle.get("snapshots", {})
     rows = snapshots.get(int(hour_offset), [])
 
+    if not rows and int(hour_offset) <= 0:
+        rows = live_results
+
     # Some airports may not report every hour. If the exact hour is empty,
     # fall back to the closest populated snapshot so the UI does not go blank.
     if not rows:
@@ -2678,6 +2660,7 @@ def apply_history_mode_results(history_enabled, hour_offset, live_results):
 
     rows = enrich_snapshot_rows_with_airport_metadata(rows, airport_lookup)
     return rows, bundle
+
 
 
 if layout_mode == "Wide":
