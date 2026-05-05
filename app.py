@@ -73,12 +73,15 @@ preferred_layout_mode = "Stacked" if (screen_width is not None and screen_width 
 def get_color(cw):
     if cw is None or pd.isna(cw):
         return ("#777777", [120, 120, 120, 180])
-    if cw > 20:
-        return ("#ff4d6d", [255, 77, 109, 230])
+
+    if cw > 30:
+        return ("#006a80", [0, 106, 128, 245])   # dark teal (extreme)
+    elif cw > 20:
+        return ("#ff4d6d", [255, 77, 109, 230])  # red
     elif cw > 15:
-        return ("#ff9f1c", [255, 159, 28, 230])
+        return ("#ff9f1c", [255, 159, 28, 230])  # orange
     else:
-        return ("#c9b458", [201, 180, 88, 210])
+        return ("#c9b458", [201, 180, 88, 210])  # yellow
 
 
 def calc_crosswind(wind_dir, wind_speed, runway_heading):
@@ -1176,7 +1179,7 @@ def render_map(rows, height=650):
     )
 
     st.pydeck_chart(deck, use_container_width=True, height=height)
-    st.caption("Red >20 kt • Orange 15–20 kt • Yellow ≤15 kt • White line = runway • Blue arrow = wind toward airport")
+    st.caption("Teal >30 kt • Red 20–30 kt • Orange 15–20 kt • Yellow ≤15 kt • White line = runway • Blue arrow = wind toward airport")
 
 
 def render_search_panel(active_airports, airport_lookup, runway_ends_by_icao, min_len, compact=False, phone=False, side_by_side_charts=True):
