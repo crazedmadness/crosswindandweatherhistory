@@ -1285,7 +1285,7 @@ def render_map(rows, height=650):
     deck = pdk.Deck(
         layers=layers,
         initial_view_state=view_state,
-        map_style="https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
+        map_style="https://basemaps.cartocdn.com/gl/dark-matter-nolabels-gl-style/style.json",
         tooltip={
             "html": """
             <b>{icao}</b><br/>
