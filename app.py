@@ -1006,35 +1006,19 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                     user-select:none;
                     touch-action:pan-y;
                 }}
-                .shell.history-off {{
-                    border-color:rgba(255,255,255,.13);
-                    background:linear-gradient(135deg, rgba(255,255,255,.04), rgba(255,255,255,.015));
-                    box-shadow:0 0 0 1px rgba(255,255,255,.025) inset, 0 8px 24px rgba(0,0,0,.16);
-                    opacity:.66;
-                    filter:grayscale(1) saturate(.18);
+                .shell.off {{
+                    filter: grayscale(1);
+                    opacity:.62;
+                    border-color:rgba(255,255,255,.16);
+                    background:linear-gradient(135deg, rgba(255,255,255,.055), rgba(255,255,255,.018));
+                    box-shadow:0 0 0 1px rgba(255,255,255,.025) inset, 0 8px 20px rgba(0,0,0,.16);
                 }}
-                .shell.history-off .viewport {{
-                    cursor:not-allowed;
-                    pointer-events:none;
-                }}
-                .shell.history-off .chip {{
-                    opacity:.32;
-                    border-color:rgba(255,255,255,.09);
-                    background:rgba(255,255,255,.025);
-                }}
-                .shell.history-off .chip.active {{
-                    opacity:.55;
-                    background:rgba(255,255,255,.06);
-                    border-color:rgba(255,255,255,.18);
-                    box-shadow:none;
-                }}
-                .shell.history-off .marker:before,
-                .shell.history-off .marker:after {{
+                .shell.off .viewport {{ cursor:not-allowed; }}
+                .shell.off .chip {{ opacity:.35; }}
+                .shell.off .marker:before, .shell.off .marker:after {{
                     background:rgba(255,255,255,.35);
                     box-shadow:none;
                 }}
-                .shell.history-off .glow {{ display:none; }}
-                .shell.history-off .hint {{ color:#b9c9c8; opacity:.55; }}
                 .inside-toggle {{
                     position:absolute;
                     left:10px;
@@ -1257,7 +1241,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
             </style>
         </head>
         <body>
-            <div class="shell" id="timelineShell">
+            <div class="shell" id="shell">
                 <button class="inside-toggle" id="insideToggle" title="Toggle 24 hour history">
                     <span class="knob"></span><span>24h</span>
                 </button>
@@ -1268,7 +1252,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                         <span><b>LOCAL</b> <span id="localLabel"></span></span>
                     </span>
                 </div>
-                <div class="hint" id="historyHint">history off</div>
+                <div class="hint">drag / wheel</div>
                 <div class="viewport" id="viewport">
                     <div class="rail" id="rail"></div>
                 </div>
@@ -1276,7 +1260,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                 <div class="marker"></div>
                 <div class="bottom">
                     <span>23h ago</span>
-                    <span id="centerText">slider locked</span>
+                    <span>fixed marker</span>
                     <span>current</span>
                 </div>
             </div>
@@ -1292,19 +1276,14 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                 const utcLabel = document.getElementById("utcLabel");
                 const localLabel = document.getElementById("localLabel");
                 const insideToggle = document.getElementById("insideToggle");
-                const shell = document.getElementById("timelineShell");
-                const historyHint = document.getElementById("historyHint");
-                const centerText = document.getElementById("centerText");
+                const shell = document.getElementById("shell");
 
                 labels.forEach(item => {{
                     const div = document.createElement("div");
                     div.className = "chip";
                     div.dataset.offset = item.offset;
                     div.innerHTML = `<div class="age">${{item.age}}</div><div class="utc">${{item.utc}}</div>`;
-                    div.addEventListener("click", () => {{
-                        if (!historyActive) return;
-                        selectOffset(item.offset, true);
-                    }});
+                    div.addEventListener("click", () => selectOffset(item.offset, true));
                     rail.appendChild(div);
                 }});
 
@@ -1319,14 +1298,11 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
 
                 function updateLabels() {{
                     const item = labels.find(x => Number(x.offset) === Number(selectedOffset)) || labels[labels.length - 1];
-                    agePill.textContent = historyActive ? (item.offset === 0 ? "CURRENT" : `${{item.offset}}H AGO`) : "OFF";
+                    agePill.textContent = item.offset === 0 ? "CURRENT" : `${{item.offset}}H AGO`;
                     utcLabel.textContent = item.utc;
                     localLabel.textContent = item.local;
                     insideToggle.classList.toggle("off", !historyActive);
-                    shell.classList.toggle("history-off", !historyActive);
-                    insideToggle.querySelector("span:last-child").textContent = historyActive ? "24h ON" : "24h OFF";
-                    historyHint.textContent = historyActive ? "drag / wheel" : "turn on 24h";
-                    centerText.textContent = historyActive ? "fixed marker" : "slider locked";
+                    shell.classList.toggle("off", !historyActive);
                     [...rail.children].forEach(chip => {{
                         chip.classList.toggle("active", Number(chip.dataset.offset) === Number(selectedOffset));
                     }});
@@ -1345,7 +1321,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                     const url = new URL(window.parent.location.href);
                     url.searchParams.set("history_mode", modeValue ? "1" : "0");
                     url.searchParams.set("history_hour", String(hourValue));
-                    window.parent.location.href = url.toString();
+                    window.parent.location.assign(url.toString());
                 }}
 
                 function pushToStreamlit() {{
@@ -1359,14 +1335,15 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                     e.stopPropagation();
                     const nextValue = !historyActive;
                     if (nextValue) {{
-                        insideToggle.querySelector("span:last-child").textContent = "BUILDING...";
-                        agePill.textContent = "BUILDING";
+                        insideToggle.querySelector("span:last-child").textContent = "LOADING";
+                        agePill.textContent = "LOADING";
                     }}
                     setParamsAndReload(nextValue, selectedOffset);
                 }});
 
                 let commitTimer = null;
                 function selectOffset(offset, commit=false) {{
+                    if (!historyActive) return;
                     selectedOffset = Math.max(0, Math.min(23, Number(offset)));
                     centerSelected(true);
                     if (commit) {{
@@ -1431,8 +1408,8 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                 viewport.addEventListener("touchend", endDrag);
 
                 viewport.addEventListener("wheel", (e) => {{
-                    if (!historyActive) return;
                     e.preventDefault();
+                    if (!historyActive) return;
                     const direction = Math.sign(e.deltaY || e.deltaX);
                     const idx = selectedIndexFromOffset(selectedOffset);
                     const nextIdx = Math.max(0, Math.min(labels.length - 1, idx + direction));
@@ -1450,13 +1427,24 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
 
 
 def render_history_slider_controls(title_text, phone=False, show_title=True):
-    """Reliable Streamlit-native history controls.
-
-    The previous custom HTML toggle could get stuck on BUILDING because iframe JS had
-    to update URL params before Streamlit saw the state change. Native widgets keep
-    the state inside Streamlit, so the switch and slider cannot get stranded.
-    """
+    """Always-visible timeline scrubber."""
     timezone_name = get_viewer_timezone()
+
+    try:
+        qp_mode = st.query_params.get("history_mode", None)
+        if isinstance(qp_mode, list):
+            qp_mode = qp_mode[0] if qp_mode else None
+        if qp_mode is not None:
+            st.session_state.history_mode = str(qp_mode).lower() in {"1", "true", "yes", "on"}
+
+        qp_hour = st.query_params.get("history_hour", None)
+        if isinstance(qp_hour, list):
+            qp_hour = qp_hour[0] if qp_hour else None
+        if qp_hour is not None:
+            st.session_state.history_hour_offset = max(0, min(23, int(qp_hour)))
+            st.session_state.history_slider_pos = 23 - st.session_state.history_hour_offset
+    except Exception:
+        pass
 
     st.markdown(
         """
@@ -1472,90 +1460,42 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
                 font-weight: 900;
                 margin: 0rem 0 0.05rem 0;
             }
-            .history-control-shell {
-                border:1px solid var(--xwind-teal-mid);
-                border-radius:16px;
-                padding:8px 10px 5px 10px;
-                margin-bottom:6px;
-                background:
-                    radial-gradient(circle at 50% 0%, rgba(18,214,203,.16), transparent 42%),
-                    linear-gradient(135deg, rgba(18,214,203,.08), rgba(255,255,255,.025));
-                box-shadow:0 0 0 1px rgba(255,255,255,.035) inset, 0 8px 24px rgba(0,0,0,.18);
+            .global-under-title {
+                margin-top:-2px;
+                margin-bottom:2px;
             }
-            .history-off-note {
-                color:#9ca8a7;
-                font-size:0.72rem;
-                font-weight:800;
-                margin-top:-6px;
-            }
-            .history-on-note {
-                color:#8df7f1;
-                font-size:0.72rem;
-                font-weight:850;
-                margin-top:-6px;
-            }
-            div[data-testid="stSlider"] { padding-top:0rem !important; padding-bottom:0rem !important; }
-            div[data-testid="stSlider"] label { display:none !important; }
-            div[data-testid="stToggle"] label, div[data-testid="stCheckbox"] label {
-                font-size:0.78rem !important;
-                font-weight:900 !important;
+            .global-under-title div[data-testid="stCheckbox"] label {
+                font-size: 0.76rem !important;
+                font-weight: 850 !important;
+                white-space: nowrap !important;
             }
             @media (max-width: 760px) {
                 .xwind-list-title { font-size: 1rem; padding-top:0px; }
-                .history-control-shell { padding:7px 8px 4px 8px; border-radius:14px; }
             }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
+    history_enabled = bool(st.session_state.get("history_mode", False))
+    hour_offset = int(st.session_state.get("history_hour_offset", 0))
+
     if show_title:
         st.markdown(f"<div class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
 
-    # One native control box: toggle starts OFF, slider is disabled/greyed until ON.
-    with st.container(border=False):
-        st.markdown("<div class='history-control-shell'>", unsafe_allow_html=True)
-        toggle_col, label_col = st.columns([0.34, 0.66], gap="small")
+    render_history_timeline_scrubber(
+        hour_offset,
+        timezone_name=timezone_name,
+        phone=phone,
+        key_prefix="phone" if phone else "wide",
+        active=history_enabled,
+    )
 
-        with toggle_col:
-            history_enabled = st.toggle(
-                "24h history",
-                value=bool(st.session_state.get("history_mode", False)),
-                key="history_mode_toggle",
-                help="Turn on to build the 24-hour top airport history list.",
-            )
+    st.session_state.history_mode = history_enabled
+    st.session_state.history_hour_offset = hour_offset
+    st.session_state.history_slider_pos = 23 - hour_offset
 
-        st.session_state.history_mode = bool(history_enabled)
-
-        previous_pos = int(st.session_state.get("history_slider_pos", 23))
-        previous_pos = max(0, min(23, previous_pos))
-
-        with label_col:
-            slider_pos = st.slider(
-                "History hour",
-                min_value=0,
-                max_value=23,
-                value=previous_pos,
-                step=1,
-                disabled=not history_enabled,
-                key="history_slider_native",
-                help="Left is 23 hours ago. Right is current.",
-            )
-
-        hour_offset = 23 - int(slider_pos)
-        st.session_state.history_slider_pos = int(slider_pos)
-        st.session_state.history_hour_offset = int(hour_offset)
-
-        note_class = "history-on-note" if history_enabled else "history-off-note"
-        note_text = (
-            f"ON • {history_offset_label(hour_offset, timezone_name)} • move the slider to update the ranked list"
-            if history_enabled
-            else "OFF • slider locked • turn on 24h history to build the cached top airport list"
-        )
-        st.markdown(f"<div class='{note_class}'>{html.escape(note_text)}</div>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    return bool(history_enabled), int(hour_offset)
+    return history_enabled, hour_offset
 
 
 def build_history_table(icao, runway_ends_by_icao, min_len, hours=24, timezone_name="America/Los_Angeles"):
@@ -2370,7 +2310,7 @@ if "global_toggle_top" not in st.session_state:
 
 
 # Bump this when the cached time-slider row shape changes.
-HISTORY_SNAPSHOT_CACHE_VERSION = "2026-05-05-history-toggle-disabled-slider-v6"
+HISTORY_SNAPSHOT_CACHE_VERSION = "2026-05-05-hourly-candidate-slider-v5"
 
 if st.session_state.get("history_snapshot_cache_version") != HISTORY_SNAPSHOT_CACHE_VERSION:
     for _key in [
@@ -2636,13 +2576,13 @@ def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_b
     if "history_snapshot_cache" not in st.session_state:
         st.session_state.history_snapshot_cache = {}
 
-    """Build the cached 24-hour top-30 history bundle only after the user turns history on."""
+    """Build/cache the 24-hour history bundle for the Top 30 candidate airports."""
     key = history_cache_key(active_icaos, use_global, min_wind, min_len, top_n)
     cache = st.session_state.get("history_snapshot_cache", {})
     st.session_state.history_snapshot_cache = cache
 
     if key not in cache:
-        candidate_limit = max(int(top_n) * 5, 150)
+        candidate_limit = int(top_n)  # keep this fast/reliable: only build the 24h cache for the displayed Top 30
         candidates = []
         seen = set()
 
@@ -2722,7 +2662,7 @@ def apply_history_mode_results(history_enabled, hour_offset, live_results):
             active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, top_n, live_results=live_results
         )
     else:
-        with st.spinner("Building 24-hour crosswind history..."):
+        with st.spinner("Loading Top 30 24-hour airport history..."):
             bundle = get_or_build_history_snapshot_bundle(
                 active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, top_n, live_results=live_results
             )
