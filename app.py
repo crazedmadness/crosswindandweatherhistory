@@ -1450,24 +1450,13 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
 
 
 def render_history_slider_controls(title_text, phone=False, show_title=True):
-    """Always-visible timeline scrubber."""
+    """Reliable Streamlit-native history controls.
+
+    The previous custom HTML toggle could get stuck on BUILDING because iframe JS had
+    to update URL params before Streamlit saw the state change. Native widgets keep
+    the state inside Streamlit, so the switch and slider cannot get stranded.
+    """
     timezone_name = get_viewer_timezone()
-
-    try:
-        qp_mode = st.query_params.get("history_mode", None)
-        if isinstance(qp_mode, list):
-            qp_mode = qp_mode[0] if qp_mode else None
-        if qp_mode is not None:
-            st.session_state.history_mode = str(qp_mode).lower() in {"1", "true", "yes", "on"}
-
-        qp_hour = st.query_params.get("history_hour", None)
-        if isinstance(qp_hour, list):
-            qp_hour = qp_hour[0] if qp_hour else None
-        if qp_hour is not None:
-            st.session_state.history_hour_offset = max(0, min(23, int(qp_hour)))
-            st.session_state.history_slider_pos = 23 - st.session_state.history_hour_offset
-    except Exception:
-        pass
 
     st.markdown(
         """
@@ -1483,42 +1472,90 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
                 font-weight: 900;
                 margin: 0rem 0 0.05rem 0;
             }
-            .global-under-title {
-                margin-top:-2px;
-                margin-bottom:2px;
+            .history-control-shell {
+                border:1px solid var(--xwind-teal-mid);
+                border-radius:16px;
+                padding:8px 10px 5px 10px;
+                margin-bottom:6px;
+                background:
+                    radial-gradient(circle at 50% 0%, rgba(18,214,203,.16), transparent 42%),
+                    linear-gradient(135deg, rgba(18,214,203,.08), rgba(255,255,255,.025));
+                box-shadow:0 0 0 1px rgba(255,255,255,.035) inset, 0 8px 24px rgba(0,0,0,.18);
             }
-            .global-under-title div[data-testid="stCheckbox"] label {
-                font-size: 0.76rem !important;
-                font-weight: 850 !important;
-                white-space: nowrap !important;
+            .history-off-note {
+                color:#9ca8a7;
+                font-size:0.72rem;
+                font-weight:800;
+                margin-top:-6px;
+            }
+            .history-on-note {
+                color:#8df7f1;
+                font-size:0.72rem;
+                font-weight:850;
+                margin-top:-6px;
+            }
+            div[data-testid="stSlider"] { padding-top:0rem !important; padding-bottom:0rem !important; }
+            div[data-testid="stSlider"] label { display:none !important; }
+            div[data-testid="stToggle"] label, div[data-testid="stCheckbox"] label {
+                font-size:0.78rem !important;
+                font-weight:900 !important;
             }
             @media (max-width: 760px) {
                 .xwind-list-title { font-size: 1rem; padding-top:0px; }
+                .history-control-shell { padding:7px 8px 4px 8px; border-radius:14px; }
             }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    history_enabled = bool(st.session_state.get("history_mode", False))
-    hour_offset = int(st.session_state.get("history_hour_offset", 0))
-
     if show_title:
         st.markdown(f"<div class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
 
-    render_history_timeline_scrubber(
-        hour_offset,
-        timezone_name=timezone_name,
-        phone=phone,
-        key_prefix="phone" if phone else "wide",
-        active=history_enabled,
-    )
+    # One native control box: toggle starts OFF, slider is disabled/greyed until ON.
+    with st.container(border=False):
+        st.markdown("<div class='history-control-shell'>", unsafe_allow_html=True)
+        toggle_col, label_col = st.columns([0.34, 0.66], gap="small")
 
-    st.session_state.history_mode = history_enabled
-    st.session_state.history_hour_offset = hour_offset
-    st.session_state.history_slider_pos = 23 - hour_offset
+        with toggle_col:
+            history_enabled = st.toggle(
+                "24h history",
+                value=bool(st.session_state.get("history_mode", False)),
+                key="history_mode_toggle",
+                help="Turn on to build the 24-hour top airport history list.",
+            )
 
-    return history_enabled, hour_offset
+        st.session_state.history_mode = bool(history_enabled)
+
+        previous_pos = int(st.session_state.get("history_slider_pos", 23))
+        previous_pos = max(0, min(23, previous_pos))
+
+        with label_col:
+            slider_pos = st.slider(
+                "History hour",
+                min_value=0,
+                max_value=23,
+                value=previous_pos,
+                step=1,
+                disabled=not history_enabled,
+                key="history_slider_native",
+                help="Left is 23 hours ago. Right is current.",
+            )
+
+        hour_offset = 23 - int(slider_pos)
+        st.session_state.history_slider_pos = int(slider_pos)
+        st.session_state.history_hour_offset = int(hour_offset)
+
+        note_class = "history-on-note" if history_enabled else "history-off-note"
+        note_text = (
+            f"ON • {history_offset_label(hour_offset, timezone_name)} • move the slider to update the ranked list"
+            if history_enabled
+            else "OFF • slider locked • turn on 24h history to build the cached top airport list"
+        )
+        st.markdown(f"<div class='{note_class}'>{html.escape(note_text)}</div>", unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    return bool(history_enabled), int(hour_offset)
 
 
 def build_history_table(icao, runway_ends_by_icao, min_len, hours=24, timezone_name="America/Los_Angeles"):
