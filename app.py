@@ -51,14 +51,9 @@ try:
 except Exception:
     pass
 
-# Keep the custom timeline scrubber state alive across URL-driven reruns.
+# Keep the custom timeline scrubber hour alive across URL-driven reruns.
+# Important: history_mode is controlled by a real Streamlit toggle, not the iframe.
 try:
-    qp_history_mode = st.query_params.get("history_mode", None)
-    if isinstance(qp_history_mode, list):
-        qp_history_mode = qp_history_mode[0] if qp_history_mode else None
-    if qp_history_mode is not None:
-        st.session_state.history_mode = str(qp_history_mode).lower() in {"1", "true", "yes", "on"}
-
     qp_history_hour = st.query_params.get("history_hour", None)
     if isinstance(qp_history_hour, list):
         qp_history_hour = qp_history_hour[0] if qp_history_hour else None
@@ -937,7 +932,8 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
     """Render a custom JS timeline scrubber with a fixed center marker.
 
     The timeline slides behind the center marker. It updates Streamlit by
-    changing URL query params. The 24h toggle lives inside the box once open.
+    changing only the history_hour query param. History on/off is controlled
+    by a real Streamlit toggle outside the iframe so it cannot get stuck.
     """
     try:
         hour_offset = int(hour_offset)
@@ -1036,7 +1032,8 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                     font-size:9px;
                     font-weight:950;
                     letter-spacing:.25px;
-                    cursor:pointer;
+                    cursor:default;
+                    pointer-events:none;
                     box-shadow:0 0 14px rgba(18,214,203,.18);
                 }}
                 .inside-toggle .knob {{
@@ -1242,7 +1239,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
         </head>
         <body>
             <div class="shell" id="shell">
-                <button class="inside-toggle" id="insideToggle" title="Toggle 24 hour history">
+                <button class="inside-toggle" id="insideToggle" title="24 hour history status">
                     <span class="knob"></span><span>24h</span>
                 </button>
                 <div class="top">
@@ -1427,16 +1424,15 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
 
 
 def render_history_slider_controls(title_text, phone=False, show_title=True):
-    """Always-visible timeline scrubber."""
+    """Always-visible timeline scrubber with Streamlit-owned history on/off.
+
+    The custom HTML scrubber is only responsible for choosing the hour. The
+    expensive Top 30 24h history build is triggered by this real Streamlit
+    toggle, which avoids iframe/query-param lockups.
+    """
     timezone_name = get_viewer_timezone()
 
     try:
-        qp_mode = st.query_params.get("history_mode", None)
-        if isinstance(qp_mode, list):
-            qp_mode = qp_mode[0] if qp_mode else None
-        if qp_mode is not None:
-            st.session_state.history_mode = str(qp_mode).lower() in {"1", "true", "yes", "on"}
-
         qp_hour = st.query_params.get("history_hour", None)
         if isinstance(qp_hour, list):
             qp_hour = qp_hour[0] if qp_hour else None
@@ -1460,6 +1456,23 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
                 font-weight: 900;
                 margin: 0rem 0 0.05rem 0;
             }
+            .history-streamlit-toggle {
+                margin-top: -3px;
+                margin-bottom: 2px;
+            }
+            .history-streamlit-toggle div[data-testid="stToggle"] {
+                min-height: 24px !important;
+            }
+            .history-streamlit-toggle label {
+                font-size: 0.74rem !important;
+                font-weight: 900 !important;
+                color: #dffffd !important;
+                white-space: nowrap !important;
+            }
+            .history-streamlit-toggle [data-testid="stWidgetLabel"] p {
+                font-size: 0.74rem !important;
+                font-weight: 900 !important;
+            }
             .global-under-title {
                 margin-top:-2px;
                 margin-bottom:2px;
@@ -1477,11 +1490,19 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
         unsafe_allow_html=True,
     )
 
-    history_enabled = bool(st.session_state.get("history_mode", False))
-    hour_offset = int(st.session_state.get("history_hour_offset", 0))
-
     if show_title:
         st.markdown(f"<div class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
+
+    st.markdown("<div class='history-streamlit-toggle'>", unsafe_allow_html=True)
+    history_enabled = st.toggle(
+        "24h history slider",
+        key="history_mode",
+        help="Build/cache the Top 30 airport history, then use the scrubber below to move between hours.",
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    hour_offset = int(st.session_state.get("history_hour_offset", 0))
+    hour_offset = max(0, min(23, hour_offset))
 
     render_history_timeline_scrubber(
         hour_offset,
@@ -1491,12 +1512,10 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
         active=history_enabled,
     )
 
-    st.session_state.history_mode = history_enabled
     st.session_state.history_hour_offset = hour_offset
     st.session_state.history_slider_pos = 23 - hour_offset
 
     return history_enabled, hour_offset
-
 
 def build_history_table(icao, runway_ends_by_icao, min_len, hours=24, timezone_name="America/Los_Angeles"):
     history = get_metar_history(icao, hours=hours)
