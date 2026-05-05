@@ -3,7 +3,7 @@ import html
 import pandas as pd
 import requests
 import streamlit as st
-import pydeck as pdk
+import pydeck as pdk12
 import altair as alt
 import streamlit.components.v1 as components
 from zoneinfo import ZoneInfo
