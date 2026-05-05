@@ -100,7 +100,12 @@ def render_header_image():
         <style>
             .block-container { padding-top: 0.55rem; }
             div[data-testid="stImage"] { margin-bottom: 0.18rem; }
-            div[data-testid="stImage"] img { border-radius: 10px; }
+            div[data-testid="stImage"] img {
+                border-radius: 10px;
+                width: 100%;
+                height: auto;
+                object-fit: contain;
+            }
             @media (max-width: 760px) {
                 .block-container { padding-top: 0.30rem !important; }
                 div[data-testid="stImage"] img { border-radius: 7px; }
