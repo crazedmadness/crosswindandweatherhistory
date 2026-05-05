@@ -2237,7 +2237,11 @@ if layout_mode == "Wide":
         results = enrich_snapshot_rows_with_airport_metadata(results, airport_lookup)
         if history_enabled:
             cached_count = len(history_bundle.get("candidate_icaos", [])) if history_bundle else 0
-            st.caption(f"Historical ranking: {history_offset_label(hour_offset, timezone_name)} • cached {cached_count} airports from {history_bundle.get(\'candidate_pool_size\', cached_count) if history_bundle else cached_count} candidates")
+            st.caption(
+    f"Historical ranking: {history_offset_label(hour_offset, timezone_name)} "
+    f"• cached {cached_count} airports from "
+    f"{history_bundle.get('candidate_pool_size', cached_count) if history_bundle else cached_count} candidates"
+)
 
         if st.session_state.selected_icao and not any(
             r["icao"] == st.session_state.selected_icao for r in results[:top_n]
@@ -2269,7 +2273,11 @@ else:
     results = enrich_snapshot_rows_with_airport_metadata(results, airport_lookup)
     if history_enabled:
         cached_count = len(history_bundle.get("candidate_icaos", [])) if history_bundle else 0
-        st.caption(f"Historical ranking: {history_offset_label(hour_offset, timezone_name)} • cached {cached_count} airports from {history_bundle.get(\'candidate_pool_size\', cached_count) if history_bundle else cached_count} candidates")
+        st.caption(
+    f"Historical ranking: {history_offset_label(hour_offset, timezone_name)} "
+    f"• cached {cached_count} airports from "
+    f"{history_bundle.get('candidate_pool_size', cached_count) if history_bundle else cached_count} candidates"
+)
 
     if st.session_state.selected_icao and not any(
         r["icao"] == st.session_state.selected_icao for r in results[:top_n]
