@@ -22,6 +22,28 @@ CLOSED_RUNWAYS = {
 
 st.set_page_config(page_title="Crosswind and Weather History", layout="wide")
 
+
+# Restore scroll position after the custom timeline iframe changes the selected hour.
+# This makes mobile/iPad feel much less like the entire page jumped away.
+st.markdown(
+    """
+    <script>
+    (function() {
+        try {
+            const storedY = window.sessionStorage.getItem("xwind_scroll_y");
+            if (storedY !== null) {
+                window.sessionStorage.removeItem("xwind_scroll_y");
+                setTimeout(function() {
+                    window.scrollTo({ top: Math.max(0, Number(storedY) || 0), behavior: "instant" });
+                }, 80);
+            }
+        } catch (e) {}
+    })();
+    </script>
+    """,
+    unsafe_allow_html=True,
+)
+
 if "selected_icao" not in st.session_state:
     st.session_state.selected_icao = None
 
@@ -52,8 +74,6 @@ except Exception:
     pass
 
 # Keep the custom timeline scrubber state alive across URL-driven reruns.
-# The real Streamlit toggle still owns history_mode, but the query param
-# restores it after iframe/iPad full-page reloads caused by hour clicks.
 try:
     qp_history_mode = st.query_params.get("history_mode", None)
     if isinstance(qp_history_mode, list):
@@ -939,8 +959,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
     """Render a custom JS timeline scrubber with a fixed center marker.
 
     The timeline slides behind the center marker. It updates Streamlit by
-    changing only the history_hour query param. History on/off is controlled
-    by a real Streamlit toggle outside the iframe so it cannot get stuck.
+    changing URL query params. The 24h toggle lives inside the box once open.
     """
     try:
         hour_offset = int(hour_offset)
@@ -1039,8 +1058,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                     font-size:9px;
                     font-weight:950;
                     letter-spacing:.25px;
-                    cursor:default;
-                    pointer-events:none;
+                    cursor:pointer;
                     box-shadow:0 0 14px rgba(18,214,203,.18);
                 }}
                 .inside-toggle .knob {{
@@ -1246,7 +1264,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
         </head>
         <body>
             <div class="shell" id="shell">
-                <button class="inside-toggle" id="insideToggle" title="24 hour history status">
+                <button class="inside-toggle" id="insideToggle" title="Toggle 24 hour history">
                     <span class="knob"></span><span>24h</span>
                 </button>
                 <div class="top">
@@ -1321,34 +1339,44 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                     updateLabels();
                 }}
 
-                function setHourAndReload(hourValue) {{
+                function setParamsAndReload(modeValue, hourValue) {{
                     const url = new URL(window.parent.location.href);
-                    // Critical for iPad/Safari: a component navigation can create a fresh
-                    // Streamlit session. Keep the mode in the URL so Python restores it.
-                    url.searchParams.set("history_mode", historyActive ? "1" : "0");
-                    url.searchParams.set("history_hour", String(hourValue));
-                    window.parent.location.assign(url.toString());
+                    const nextMode = modeValue ? "1" : "0";
+                    const nextHour = String(hourValue);
+
+                    // Keep the Streamlit-side history toggle ON while changing hours.
+                    // The old iframe reload path could drop this on iPad/iPhone.
+                    url.searchParams.set("history_mode", nextMode);
+                    url.searchParams.set("history_hour", nextHour);
+
+                    // Cache-bust the URL so desktop browsers do not visually move the
+                    // scrubber while leaving Python on the previous hour.
+                    url.searchParams.set("history_tick", String(Date.now()));
+
+                    // Preserve the current page position so mobile returns to the slider/list
+                    // instead of flashing back to the top of the app.
+                    try {{
+                        window.parent.sessionStorage.setItem("xwind_scroll_y", String(window.parent.scrollY || 0));
+                    }} catch (e) {{}}
+
+                    window.parent.location.replace(url.toString());
                 }}
 
                 function pushToStreamlit() {{
                     if (historyActive) {{
-                        setHourAndReload(selectedOffset);
+                        setParamsAndReload(true, selectedOffset);
                     }}
                 }}
 
                 insideToggle.addEventListener("click", (e) => {{
                     e.preventDefault();
                     e.stopPropagation();
-                    // The actual ON/OFF state is owned by the native Streamlit toggle
-                    // above the scrubber. This in-box pill is visual only once active.
-                    if (!historyActive) {{
-                        const url = new URL(window.parent.location.href);
-                        url.searchParams.set("history_mode", "1");
-                        url.searchParams.set("history_hour", String(selectedOffset));
+                    const nextValue = !historyActive;
+                    if (nextValue) {{
                         insideToggle.querySelector("span:last-child").textContent = "LOADING";
                         agePill.textContent = "LOADING";
-                        window.parent.location.assign(url.toString());
                     }}
+                    setParamsAndReload(nextValue, selectedOffset);
                 }});
 
                 let commitTimer = null;
@@ -1437,15 +1465,16 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
 
 
 def render_history_slider_controls(title_text, phone=False, show_title=True):
-    """Always-visible timeline scrubber with Streamlit-owned history on/off.
-
-    The custom HTML scrubber is only responsible for choosing the hour. The
-    expensive Top 30 24h history build is triggered by this real Streamlit
-    toggle, which avoids iframe/query-param lockups.
-    """
+    """Always-visible timeline scrubber."""
     timezone_name = get_viewer_timezone()
 
     try:
+        qp_mode = st.query_params.get("history_mode", None)
+        if isinstance(qp_mode, list):
+            qp_mode = qp_mode[0] if qp_mode else None
+        if qp_mode is not None:
+            st.session_state.history_mode = str(qp_mode).lower() in {"1", "true", "yes", "on"}
+
         qp_hour = st.query_params.get("history_hour", None)
         if isinstance(qp_hour, list):
             qp_hour = qp_hour[0] if qp_hour else None
@@ -1469,23 +1498,6 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
                 font-weight: 900;
                 margin: 0rem 0 0.05rem 0;
             }
-            .history-streamlit-toggle {
-                margin-top: -3px;
-                margin-bottom: 2px;
-            }
-            .history-streamlit-toggle div[data-testid="stToggle"] {
-                min-height: 24px !important;
-            }
-            .history-streamlit-toggle label {
-                font-size: 0.74rem !important;
-                font-weight: 900 !important;
-                color: #dffffd !important;
-                white-space: nowrap !important;
-            }
-            .history-streamlit-toggle [data-testid="stWidgetLabel"] p {
-                font-size: 0.74rem !important;
-                font-weight: 900 !important;
-            }
             .global-under-title {
                 margin-top:-2px;
                 margin-bottom:2px;
@@ -1503,19 +1515,11 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
         unsafe_allow_html=True,
     )
 
+    history_enabled = bool(st.session_state.get("history_mode", False))
+    hour_offset = int(st.session_state.get("history_hour_offset", 0))
+
     if show_title:
         st.markdown(f"<div class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
-
-    st.markdown("<div class='history-streamlit-toggle'>", unsafe_allow_html=True)
-    history_enabled = st.toggle(
-        "24h history slider",
-        key="history_mode",
-        help="Build/cache the Top 30 airport history, then use the scrubber below to move between hours.",
-    )
-    st.markdown("</div>", unsafe_allow_html=True)
-
-    hour_offset = int(st.session_state.get("history_hour_offset", 0))
-    hour_offset = max(0, min(23, hour_offset))
 
     render_history_timeline_scrubber(
         hour_offset,
@@ -1525,10 +1529,12 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
         active=history_enabled,
     )
 
+    st.session_state.history_mode = history_enabled
     st.session_state.history_hour_offset = hour_offset
     st.session_state.history_slider_pos = 23 - hour_offset
 
     return history_enabled, hour_offset
+
 
 def build_history_table(icao, runway_ends_by_icao, min_len, hours=24, timezone_name="America/Los_Angeles"):
     history = get_metar_history(icao, hours=hours)
@@ -2342,7 +2348,7 @@ if "global_toggle_top" not in st.session_state:
 
 
 # Bump this when the cached time-slider row shape changes.
-HISTORY_SNAPSHOT_CACHE_VERSION = "2026-05-05-hourly-candidate-slider-v5"
+HISTORY_SNAPSHOT_CACHE_VERSION = "2026-05-05-hourly-all-active-slider-v6"
 
 if st.session_state.get("history_snapshot_cache_version") != HISTORY_SNAPSHOT_CACHE_VERSION:
     for _key in [
@@ -2614,35 +2620,34 @@ def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_b
     st.session_state.history_snapshot_cache = cache
 
     if key not in cache:
-        candidate_limit = int(top_n)  # keep this fast/reliable: only build the 24h cache for the displayed Top 30
+        # Build the hourly rankings from the full active airport set, not just
+        # the current Top 30. Using only the current Top 30 makes desktop appear
+        # "stuck" on the same airports at every hour.
+        # US mode is usually small enough to scan fully. Global mode is capped
+        # to avoid huge first-load delays on Streamlit Cloud.
+        if use_global:
+            candidate_limit = min(len(active_icaos), 900)
+        else:
+            candidate_limit = len(active_icaos)
+
         candidates = []
         seen = set()
 
-        # Start from live ranked results. This mirrors the airports most likely
-        # to remain relevant across the last 24 hours without fetching the world.
-        for row in (live_results or []):
-            icao = str(row.get("icao", "")).upper().strip()
+        # Always include the current selected/search airport first.
+        selected = str(st.session_state.get("selected_icao") or "").upper().strip()
+        if selected:
+            candidates.append(selected)
+            seen.add(selected)
+
+        # Then scan the full active airport list so each hour can produce a true
+        # Top 30 for that hour instead of being limited to today's current Top 30.
+        for icao in active_icaos:
+            icao = str(icao).upper().strip()
             if icao and icao not in seen:
                 candidates.append(icao)
                 seen.add(icao)
             if len(candidates) >= candidate_limit:
                 break
-
-        # Always include the current selected/search airport.
-        selected = str(st.session_state.get("selected_icao") or "").upper().strip()
-        if selected and selected not in seen:
-            candidates.append(selected)
-            seen.add(selected)
-
-        # Fallback if live winds are sparse.
-        if len(candidates) < int(top_n):
-            for icao in active_icaos:
-                icao = str(icao).upper().strip()
-                if icao and icao not in seen:
-                    candidates.append(icao)
-                    seen.add(icao)
-                if len(candidates) >= candidate_limit:
-                    break
 
         snapshots = build_24h_ranked_snapshots(
             tuple(candidates),
