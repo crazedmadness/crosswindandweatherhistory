@@ -791,38 +791,44 @@ def build_history_table(icao, runway_ends_by_icao, min_len, hours=24, timezone_n
 
     df = pd.DataFrame(rows)
     df = df.dropna(subset=["Time"]).sort_values("Time", ascending=False)
+
     now_utc = pd.Timestamp.now(tz="UTC")
 
-def format_relative(ts):
-    if ts is None or pd.isna(ts):
-        return ""
+    def format_relative(ts):
+        if ts is None or pd.isna(ts):
+            return ""
 
-    delta = now_utc - ts
+        timestamp = pd.Timestamp(ts)
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.tz_localize("UTC")
+        else:
+            timestamp = timestamp.tz_convert("UTC")
 
-    minutes = int(delta.total_seconds() / 60)
+        delta = now_utc - timestamp
+        minutes = max(0, int(delta.total_seconds() / 60))
 
-    if minutes < 1:
-        return "just now"
-    elif minutes < 60:
-        return f"{minutes}m ago"
-    elif minutes < 1440:
-        hours = minutes // 60
-        return f"{hours}h ago"
-    else:
-        days = minutes // 1440
-        return f"{days}d ago"
+        if minutes < 1:
+            return "just now"
+        if minutes < 60:
+            return f"{minutes}m ago"
+        if minutes < 1440:
+            hours_ago = minutes // 60
+            return f"{hours_ago}h ago"
 
-df["UTC"] = df["Time"].dt.strftime("%H:%MZ")
-df["Local"] = format_user_local_time(df["Time"], timezone_name)
-tz_short = pd.Timestamp.now(tz=ZoneInfo(timezone_name)).strftime("%Z")
+        days_ago = minutes // 1440
+        return f"{days_ago}d ago"
 
-df["Relative"] = df["Time"].apply(format_relative)
+    df["UTC"] = df["Time"].dt.strftime("%H:%MZ")
+    df["Local"] = format_user_local_time(df["Time"], timezone_name)
+    tz_short = pd.Timestamp.now(tz=ZoneInfo(timezone_name)).strftime("%Z")
+    df["Relative"] = df["Time"].apply(format_relative)
 
-df["Time Display"] = (
-    df["UTC"]
-    + " (" + df["Local"] + " " + tz_short + ")"
-    + " (" + df["Relative"] + ")"
-)
+    df["Time Display"] = (
+        df["UTC"]
+        + " (" + df["Local"] + " " + tz_short + ")"
+        + " (" + df["Relative"] + ")"
+    )
+
     df["Wind"] = df["Wind"] + df["Gust"]
 
     df["Elevation"] = pd.to_numeric(df.get("Elevation"), errors="coerce")
