@@ -1,4 +1,4 @@
-import math12
+import math
 import html
 import pandas as pd
 import requests
