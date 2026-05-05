@@ -1006,6 +1006,35 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                     user-select:none;
                     touch-action:pan-y;
                 }}
+                .shell.history-off {{
+                    border-color:rgba(255,255,255,.13);
+                    background:linear-gradient(135deg, rgba(255,255,255,.04), rgba(255,255,255,.015));
+                    box-shadow:0 0 0 1px rgba(255,255,255,.025) inset, 0 8px 24px rgba(0,0,0,.16);
+                    opacity:.66;
+                    filter:grayscale(1) saturate(.18);
+                }}
+                .shell.history-off .viewport {{
+                    cursor:not-allowed;
+                    pointer-events:none;
+                }}
+                .shell.history-off .chip {{
+                    opacity:.32;
+                    border-color:rgba(255,255,255,.09);
+                    background:rgba(255,255,255,.025);
+                }}
+                .shell.history-off .chip.active {{
+                    opacity:.55;
+                    background:rgba(255,255,255,.06);
+                    border-color:rgba(255,255,255,.18);
+                    box-shadow:none;
+                }}
+                .shell.history-off .marker:before,
+                .shell.history-off .marker:after {{
+                    background:rgba(255,255,255,.35);
+                    box-shadow:none;
+                }}
+                .shell.history-off .glow {{ display:none; }}
+                .shell.history-off .hint {{ color:#b9c9c8; opacity:.55; }}
                 .inside-toggle {{
                     position:absolute;
                     left:10px;
@@ -1228,7 +1257,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
             </style>
         </head>
         <body>
-            <div class="shell">
+            <div class="shell" id="timelineShell">
                 <button class="inside-toggle" id="insideToggle" title="Toggle 24 hour history">
                     <span class="knob"></span><span>24h</span>
                 </button>
@@ -1239,7 +1268,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                         <span><b>LOCAL</b> <span id="localLabel"></span></span>
                     </span>
                 </div>
-                <div class="hint">drag / wheel</div>
+                <div class="hint" id="historyHint">history off</div>
                 <div class="viewport" id="viewport">
                     <div class="rail" id="rail"></div>
                 </div>
@@ -1247,7 +1276,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                 <div class="marker"></div>
                 <div class="bottom">
                     <span>23h ago</span>
-                    <span>fixed marker</span>
+                    <span id="centerText">slider locked</span>
                     <span>current</span>
                 </div>
             </div>
@@ -1263,13 +1292,19 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                 const utcLabel = document.getElementById("utcLabel");
                 const localLabel = document.getElementById("localLabel");
                 const insideToggle = document.getElementById("insideToggle");
+                const shell = document.getElementById("timelineShell");
+                const historyHint = document.getElementById("historyHint");
+                const centerText = document.getElementById("centerText");
 
                 labels.forEach(item => {{
                     const div = document.createElement("div");
                     div.className = "chip";
                     div.dataset.offset = item.offset;
                     div.innerHTML = `<div class="age">${{item.age}}</div><div class="utc">${{item.utc}}</div>`;
-                    div.addEventListener("click", () => selectOffset(item.offset, true));
+                    div.addEventListener("click", () => {{
+                        if (!historyActive) return;
+                        selectOffset(item.offset, true);
+                    }});
                     rail.appendChild(div);
                 }});
 
@@ -1284,10 +1319,14 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
 
                 function updateLabels() {{
                     const item = labels.find(x => Number(x.offset) === Number(selectedOffset)) || labels[labels.length - 1];
-                    agePill.textContent = item.offset === 0 ? "CURRENT" : `${{item.offset}}H AGO`;
+                    agePill.textContent = historyActive ? (item.offset === 0 ? "CURRENT" : `${{item.offset}}H AGO`) : "OFF";
                     utcLabel.textContent = item.utc;
                     localLabel.textContent = item.local;
                     insideToggle.classList.toggle("off", !historyActive);
+                    shell.classList.toggle("history-off", !historyActive);
+                    insideToggle.querySelector("span:last-child").textContent = historyActive ? "24h ON" : "24h OFF";
+                    historyHint.textContent = historyActive ? "drag / wheel" : "turn on 24h";
+                    centerText.textContent = historyActive ? "fixed marker" : "slider locked";
                     [...rail.children].forEach(chip => {{
                         chip.classList.toggle("active", Number(chip.dataset.offset) === Number(selectedOffset));
                     }});
@@ -1347,6 +1386,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                 }}
 
                 function startDrag(e) {{
+                    if (!historyActive) return;
                     dragging = true;
                     moved = false;
                     viewport.classList.add("dragging");
@@ -1391,6 +1431,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                 viewport.addEventListener("touchend", endDrag);
 
                 viewport.addEventListener("wheel", (e) => {{
+                    if (!historyActive) return;
                     e.preventDefault();
                     const direction = Math.sign(e.deltaY || e.deltaX);
                     const idx = selectedIndexFromOffset(selectedOffset);
@@ -2292,7 +2333,7 @@ if "global_toggle_top" not in st.session_state:
 
 
 # Bump this when the cached time-slider row shape changes.
-HISTORY_SNAPSHOT_CACHE_VERSION = "2026-05-05-hourly-candidate-slider-v5"
+HISTORY_SNAPSHOT_CACHE_VERSION = "2026-05-05-history-toggle-disabled-slider-v6"
 
 if st.session_state.get("history_snapshot_cache_version") != HISTORY_SNAPSHOT_CACHE_VERSION:
     for _key in [
@@ -2558,15 +2599,7 @@ def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_b
     if "history_snapshot_cache" not in st.session_state:
         st.session_state.history_snapshot_cache = {}
 
-    """
-
-    We intentionally do NOT pull 24-hour history for every airport in the whole
-    dataset. That is too slow. Instead:
-      1. 
-      2. 
-      3. 
-      4. 
-    """
+    """Build the cached 24-hour top-30 history bundle only after the user turns history on."""
     key = history_cache_key(active_icaos, use_global, min_wind, min_len, top_n)
     cache = st.session_state.get("history_snapshot_cache", {})
     st.session_state.history_snapshot_cache = cache
@@ -2652,8 +2685,7 @@ def apply_history_mode_results(history_enabled, hour_offset, live_results):
             active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, top_n, live_results=live_results
         )
     else:
-        st.info("Building 24-hour crosswind history cache. This happens once, then the scrubber is instant.")
-        with st.spinner("Building 24-hour hourly snapshot cache..."):
+        with st.spinner("Building 24-hour crosswind history..."):
             bundle = get_or_build_history_snapshot_bundle(
                 active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, top_n, live_results=live_results
             )
