@@ -5,6 +5,7 @@ import requests
 import streamlit as st
 import pydeck as pdk
 import altair as alt
+import streamlit.components.v1 as components
 from zoneinfo import ZoneInfo
 
 try:
@@ -35,6 +36,17 @@ try:
         st.session_state.selected_icao = str(qp_selected).upper().strip()
 except Exception:
     pass
+
+
+def render_raw_html(markup, height=96):
+    """Render small HTML UI blocks without showing raw tags in older Streamlit versions."""
+    try:
+        if hasattr(st, "html"):
+            st.html(markup)
+        else:
+            components.html(markup, height=height, scrolling=False)
+    except Exception:
+        components.html(markup, height=height, scrolling=False)
 
 
 def get_screen_width():
@@ -834,71 +846,72 @@ def render_rows(rows, runway_ends_by_icao, min_len, compact=False, phone=False, 
             selected_ring = "box-shadow:0 0 0 2px rgba(255,255,255,0.32) inset;" if selected else ""
             href = f"?selected_icao={html.escape(str(r['icao']))}"
 
-            st.markdown(
-                f"""
-                <a href="{href}" target="_self" style="text-decoration:none; color:inherit;">
+            card_html = f"""
+            <a href="{href}" target="_parent" style="text-decoration:none; color:inherit; display:block;">
+                <div style="
+                    border:1px solid rgba(255,255,255,0.18);
+                    border-radius:12px;
+                    padding:5px 6px 6px 6px;
+                    margin:0 0 5px 0;
+                    background:rgba(255,255,255,0.025);
+                    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+                    {selected_ring}
+                ">
                     <div style="
-                        border:1px solid rgba(255,255,255,0.18);
-                        border-radius:12px;
-                        padding:5px 6px 6px 6px;
-                        margin:0 0 5px 0;
-                        background:rgba(255,255,255,0.025);
-                        {selected_ring}
+                        display:grid;
+                        grid-template-columns:minmax(0, 58%) minmax(0, 42%);
+                        min-height:52px;
                     ">
                         <div style="
-                            display:grid;
-                            grid-template-columns: 58% 42%;
-                            min-height:52px;
+                            border:1px solid {color_hex};
+                            border-right:0;
+                            background:{color_hex}22;
+                            border-radius:10px 0 0 10px;
+                            display:flex;
+                            align-items:center;
+                            justify-content:center;
+                            box-sizing:border-box;
+                            min-width:0;
                         ">
-                            <div style="
-                                border:1px solid {color_hex};
-                                border-right:0;
-                                background:{color_hex}22;
-                                border-radius:10px 0 0 10px;
-                                display:flex;
-                                align-items:center;
-                                justify-content:center;
-                                box-sizing:border-box;
-                            ">
-                                <div style="text-align:center;">
-                                    <div style="font-size:25px; line-height:25px; font-weight:950; color:{color_hex};">{r['cw']}</div>
-                                    <div style="font-size:7px; line-height:8px; color:#f1f1f1; font-weight:900; letter-spacing:.25px;">KT XWIND</div>
-                                </div>
-                                {gust_html}
+                            <div style="text-align:center;">
+                                <div style="font-size:25px; line-height:25px; font-weight:950; color:{color_hex};">{r['cw']}</div>
+                                <div style="font-size:7px; line-height:8px; color:#f1f1f1; font-weight:900; letter-spacing:.25px;">KT XWIND</div>
                             </div>
-                            <div style="
-                                border:1px solid {color_hex};
-                                background:{color_hex}15;
-                                border-radius:0 10px 10px 0;
-                                display:flex;
-                                align-items:center;
-                                justify-content:center;
-                                flex-direction:column;
-                                box-sizing:border-box;
-                            ">
-                                <div style="font-size:21px; line-height:22px; font-weight:950; color:#ffffff; letter-spacing:.4px;">{html.escape(str(r['icao']))} ▼</div>
-                                <div style="font-size:7px; line-height:8px; color:#dcdcdc; font-weight:800;">tap for history</div>
-                            </div>
+                            {gust_html}
                         </div>
                         <div style="
-                            display:grid;
-                            grid-template-columns: 32% 35% 33%;
-                            column-gap:4px;
-                            color:#d8d8d8;
-                            font-size:10px;
-                            line-height:12px;
-                            padding-top:4px;
-                            overflow:hidden;
+                            border:1px solid {color_hex};
+                            background:{color_hex}15;
+                            border-radius:0 10px 10px 0;
+                            display:flex;
+                            align-items:center;
+                            justify-content:center;
+                            flex-direction:column;
+                            box-sizing:border-box;
+                            min-width:0;
                         ">
-                            <div><b>{html.escape(str(r['wind']))}{gust_text}</b></div>
-                            <div>RWY {html.escape(str(r['runway']))} · {r['length']} ft</div>
-                            <div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{airport_short}</div>
+                            <div style="font-size:21px; line-height:22px; font-weight:950; color:#ffffff; letter-spacing:.4px; white-space:nowrap;">{html.escape(str(r['icao']))} ▼</div>
+                            <div style="font-size:7px; line-height:8px; color:#dcdcdc; font-weight:800;">tap for history</div>
                         </div>
                     </div>
-                </a>
-                """,
-                unsafe_allow_html=True,
-            )
+                    <div style="
+                        display:grid;
+                        grid-template-columns: 32% 35% 33%;
+                        column-gap:4px;
+                        color:#d8d8d8;
+                        font-size:10px;
+                        line-height:12px;
+                        padding-top:4px;
+                        overflow:hidden;
+                    ">
+                        <div><b>{html.escape(str(r['wind']))}{gust_text}</b></div>
+                        <div>RWY {html.escape(str(r['runway']))} · {r['length']} ft</div>
+                        <div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{airport_short}</div>
+                    </div>
+                </div>
+            </a>
+            """
+            render_raw_html(card_html, height=88)
 
             if selected:
                 render_history_panel(
