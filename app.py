@@ -92,36 +92,69 @@ def get_header_image_path():
 
 
 def render_header_image():
-    """Render the logo/banner at the top in place of the old text title."""
-    image_path = get_header_image_path()
+WIDE_HEADER_BASENAME = "19c28a51-1047-4e6d-8888-da9a8ebd1d88"
+MOBILE_HEADER_BASENAME = "4cb39212-8ac7-44db-a2ec-07f7cff0ff5e"
 
-    st.markdown(
-        """
-        <style>
-            .block-container { padding-top: 0.55rem; }
-            div[data-testid="stImage"] { margin-bottom: 0.18rem; }
+def get_header_image_path_for_screen():
+    def find_file(base):
+        candidates = [
+            base,
+            f"{base}.png",
+            f"{base}.jpg",
+            f"{base}.jpeg",
+            f"{base}.webp",
+        ]
+        for c in candidates:
+            if Path(c).exists():
+                return c
+        return None
+
+    if is_desktop or (is_tablet and (screen_width and screen_width >= 980)):
+        return find_file(WIDE_HEADER_BASENAME)
+
+    return find_file(MOBILE_HEADER_BASENAME)
+
+
+def render_header_image():
+    image_path = get_header_image_path_for_screen()
+
+    st.markdown("""
+    <style>
+        .block-container { padding-top: 0.25rem !important; }
+
+        div[data-testid="stImage"] {
+            margin-bottom: 0.1rem;
+        }
+
+        div[data-testid="stImage"] img {
+            width: 100%;
+            height: 75px;
+            object-fit: cover;
+            object-position: center 40%;
+            border-radius: 10px;
+        }
+
+        @media (max-width: 1180px) {
             div[data-testid="stImage"] img {
-                border-radius: 10px;
-                width: 100%;
-                height: auto;
+                height: 85px;
+            }
+        }
+
+        @media (max-width: 760px) {
+            div[data-testid="stImage"] img {
+                height: 105px;
                 object-fit: contain;
+                border-radius: 7px;
             }
-            @media (max-width: 760px) {
-                .block-container { padding-top: 0.30rem !important; }
-                div[data-testid="stImage"] img { border-radius: 7px; }
-            }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+        }
+    </style>
+    """, unsafe_allow_html=True)
 
     if image_path:
         st.image(image_path, use_container_width=True)
     else:
-        st.warning(
-            f"Header image not found. Add {HEADER_IMAGE_BASENAME}.png to the same folder as app.py."
-        )
-
+        st.warning("Header image not found.")
+# --- paste ends here ---
 
 def get_color(cw):
     if cw is None or pd.isna(cw):
