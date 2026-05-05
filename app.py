@@ -29,20 +29,16 @@ if "selected_airport_result" not in st.session_state:
     st.session_state.selected_airport_result = None
 
 if "history_mode" not in st.session_state:
-    # Scrubber is always visible. This controls whether the 24h cache is loaded/active.
+    # Scrubber is always visible. This controls whether hourly cache is active.
     st.session_state.history_mode = False
 
 if "history_slider_pos" not in st.session_state:
-    # Slider position is 0 = 23 hours ago, 23 = current/right side.
     st.session_state.history_slider_pos = 23
 
 if "history_hour_offset" not in st.session_state:
-    # 0 = current, 23 = 23 hours ago.
     st.session_state.history_hour_offset = 0
 
 if "history_snapshot_cache" not in st.session_state:
-    # Manual in-session cache so moving the slider only swaps an already-built list.
-    # This avoids re-fetching or re-ranking on every Streamlit rerun.
     st.session_state.history_snapshot_cache = {}
 
 # Allow mobile HTML cards to select/expand an airport via query string.
@@ -977,7 +973,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
     payload = json.dumps(labels)
     selected_json = json.dumps(hour_offset)
     active_json = json.dumps(bool(active))
-    height = 104 if phone else 106
+    height = 112 if phone else 118
 
     components.html(
         f"""
@@ -1019,7 +1015,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                 .inside-toggle {{
                     position:absolute;
                     left:10px;
-                    top:5px;
+                    top:7px;
                     z-index:10;
                     height:20px;
                     display:flex;
@@ -1043,8 +1039,18 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                     background:var(--teal);
                     box-shadow:0 0 14px rgba(18,214,203,.72);
                 }}
+                .inside-toggle.off {{
+                    background:rgba(255,255,255,.055);
+                    border-color:rgba(255,255,255,.16);
+                    color:#b9c9c8;
+                    box-shadow:none;
+                }}
+                .inside-toggle.off .knob {{
+                    background:rgba(255,255,255,.28);
+                    box-shadow:none;
+                }}
                 .top {{
-                    height:27px;
+                    height:31px;
                     display:flex;
                     align-items:center;
                     justify-content:center;
@@ -1077,15 +1083,15 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                     position:absolute;
                     left:0;
                     right:0;
-                    top:27px;
-                    bottom:15px;
+                    top:31px;
+                    bottom:18px;
                     overflow:hidden;
                     cursor:grab;
                 }}
                 .viewport.dragging {{ cursor:grabbing; }}
                 .rail {{
                     position:absolute;
-                    top:14px;
+                    top:18px;
                     height:42px;
                     display:flex;
                     align-items:center;
@@ -1140,8 +1146,8 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                 .marker {{
                     position:absolute;
                     left:50%;
-                    top:27px;
-                    bottom:12px;
+                    top:31px;
+                    bottom:14px;
                     width:0;
                     pointer-events:none;
                     z-index:5;
@@ -1172,8 +1178,8 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                 .glow {{
                     position:absolute;
                     left:50%;
-                    top:27px;
-                    bottom:15px;
+                    top:31px;
+                    bottom:18px;
                     width:100px;
                     transform:translateX(-50%);
                     background:linear-gradient(90deg, transparent, rgba(18,214,203,.12), transparent);
@@ -1184,7 +1190,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                     position:absolute;
                     left:12px;
                     right:12px;
-                    bottom:3px;
+                    bottom:4px;
                     display:flex;
                     justify-content:space-between;
                     color:var(--muted);
@@ -1194,7 +1200,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                 .hint {{
                     position:absolute;
                     right:12px;
-                    top:6px;
+                    top:8px;
                     color:#6deee8;
                     font-size:9px;
                     font-weight:850;
@@ -1401,14 +1407,13 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
 
 
 def render_history_slider_controls(title_text, phone=False, show_title=True):
-    """Top-of-list custom timeline scrubber.
+    """Always-visible timeline scrubber.
 
-    The scrubber is always visible. The 24h button inside the scrubber toggles
-    cache/history mode. Dragging or clicking the timeline also turns history on.
+    The 24h button inside the scrubber controls whether cached hourly history
+    is active. When inactive, the scrubber is only a preview and the list stays live.
     """
     timezone_name = get_viewer_timezone()
 
-    # Read selected state from URL params written by the custom JS scrubber.
     try:
         qp_mode = st.query_params.get("history_mode", None)
         if isinstance(qp_mode, list):
@@ -2552,6 +2557,9 @@ def history_cache_key(active_icaos, use_global, min_wind, min_len, top_n):
 
 
 def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, top_n, live_results=None):
+    if "history_snapshot_cache" not in st.session_state:
+        st.session_state.history_snapshot_cache = {}
+
     """Build and cache the 24-hour slider snapshots from a practical candidate pool.
 
     We intentionally do NOT pull 24-hour history for every airport in the whole
@@ -2562,7 +2570,8 @@ def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_b
       4. Slider movement swaps prebuilt lists instantly.
     """
     key = history_cache_key(active_icaos, use_global, min_wind, min_len, top_n)
-    cache = st.session_state.history_snapshot_cache
+    cache = st.session_state.get("history_snapshot_cache", {})
+    st.session_state.history_snapshot_cache = cache
 
     if key not in cache:
         candidate_limit = max(int(top_n) * 5, 150)
@@ -2621,9 +2630,12 @@ def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_b
 def apply_history_mode_results(history_enabled, hour_offset, live_results):
     """Return live results or a prebuilt hourly snapshot.
 
-    The scrubber can be visible without loading history. Once the built-in 24h
-    button is on, build the cache immediately and use the selected hourly list.
+    When 24h is off, the scrubber remains visible but the rows/map stay live.
+    When 24h is clicked on, this builds the full hourly cache once.
     """
+    if "history_snapshot_cache" not in st.session_state:
+        st.session_state.history_snapshot_cache = {}
+
     if not history_enabled:
         return live_results, {
             "snapshots": {0: live_results},
@@ -2634,12 +2646,14 @@ def apply_history_mode_results(history_enabled, hour_offset, live_results):
         }
 
     key = history_cache_key(active_icaos, use_global, min_wind, min_len, top_n)
-    if key in st.session_state.history_snapshot_cache:
+
+    if key in st.session_state.get("history_snapshot_cache", {}):
         bundle = get_or_build_history_snapshot_bundle(
             active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, top_n, live_results=live_results
         )
     else:
-        with st.spinner("Building 24-hour hourly snapshot cache once..."):
+        st.info("Building 24-hour crosswind history cache. This happens once, then the scrubber is instant.")
+        with st.spinner("Building 24-hour hourly snapshot cache..."):
             bundle = get_or_build_history_snapshot_bundle(
                 active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, top_n, live_results=live_results
             )
@@ -2650,8 +2664,6 @@ def apply_history_mode_results(history_enabled, hour_offset, live_results):
     if not rows and int(hour_offset) <= 0:
         rows = live_results
 
-    # Some airports may not report every hour. If the exact hour is empty,
-    # fall back to the closest populated snapshot so the UI does not go blank.
     if not rows:
         available = [h for h, r in snapshots.items() if r]
         if available:
