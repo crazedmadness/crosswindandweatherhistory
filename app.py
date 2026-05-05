@@ -54,16 +54,11 @@ try:
 except Exception:
     pass
 
-# Keep the custom timeline scrubber state alive across URL-driven reruns.
-# The real Streamlit toggle still owns history_mode, but the query param
-# restores it after iframe/iPad full-page reloads caused by hour clicks.
+# Keep the custom timeline scrubber hour alive across reruns.
+# IMPORTANT: do not restore history_mode from query params here. The real
+# Streamlit checkbox owns that state. Restoring mode from stale URL params is
+# what made the 24h toggle immediately flip back off after component reruns.
 try:
-    qp_history_mode = st.query_params.get("history_mode", None)
-    if isinstance(qp_history_mode, list):
-        qp_history_mode = qp_history_mode[0] if qp_history_mode else None
-    if qp_history_mode is not None:
-        st.session_state.history_mode = str(qp_history_mode).lower() in {"1", "true", "yes", "on"}
-
     qp_history_hour = st.query_params.get("history_hour", None)
     if isinstance(qp_history_hour, list):
         qp_history_hour = qp_history_hour[0] if qp_history_hour else None
@@ -1068,11 +1063,9 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
     # Always-visible timeline scrubber with Streamlit-owned history on/off.
     timezone_name = get_viewer_timezone()
     try:
-        qp_history_mode = st.query_params.get("history_mode", None)
-        if isinstance(qp_history_mode, list):
-            qp_history_mode = qp_history_mode[0] if qp_history_mode else None
-        if qp_history_mode is not None:
-            st.session_state.history_mode = str(qp_history_mode).lower() in {"1", "true", "yes", "on"}
+        # Only restore the selected hour from the URL. history_mode is owned by
+        # the Streamlit checkbox below and must not be overwritten by stale
+        # query params during component callback reruns.
         qp_hour = st.query_params.get("history_hour", None)
         if isinstance(qp_hour, list):
             qp_hour = qp_hour[0] if qp_hour else None
@@ -1096,10 +1089,13 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
     if show_title:
         st.markdown(f"<div id='xwind-history-anchor' class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
     st.markdown("<div class='history-streamlit-toggle'>", unsafe_allow_html=True)
-    if hasattr(st, "toggle"):
-        history_enabled = st.toggle("24h history slider", key="history_mode", help="Build/cache the Top 15 airport history, then use the scrubber below to move between hours.")
-    else:
-        history_enabled = st.checkbox("24h history slider", key="history_mode", help="Build/cache the Top 15 airport history, then use the scrubber below to move between hours.")
+    # Use checkbox instead of st.toggle here because it preserves state more
+    # predictably across custom-component reruns on Streamlit Cloud/mobile.
+    history_enabled = st.checkbox(
+        "24h history slider",
+        key="history_mode",
+        help="Build/cache the Top 15 airport history, then use the scrubber below to move between hours.",
+    )
     st.markdown("</div>", unsafe_allow_html=True)
     hour_offset = int(st.session_state.get("history_hour_offset", 0))
     hour_offset = max(0, min(23, hour_offset))
@@ -1110,11 +1106,9 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
         hour_offset = 0
     st.session_state.history_hour_offset = hour_offset
     st.session_state.history_slider_pos = 23 - hour_offset
-    try:
-        st.query_params["history_mode"] = "1" if history_enabled else "0"
-        st.query_params["history_hour"] = str(hour_offset)
-    except Exception:
-        pass
+    # Do not mutate st.query_params here. The custom component now uses a real
+    # Streamlit callback, so URL writes are unnecessary and can trigger extra
+    # reruns that desync the checkbox state.
     return history_enabled, hour_offset
 
 def build_history_table(icao, runway_ends_by_icao, min_len, hours=24, timezone_name="America/Los_Angeles"):
