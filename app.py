@@ -71,7 +71,7 @@ is_tablet = screen_width is not None and 760 <= screen_width < 1180
 is_desktop = screen_width is None or screen_width >= 1180
 preferred_layout_mode = "Stacked" if (screen_width is not None and screen_width < 980) else "Wide"
 
-HEADER_IMAGE_BASENAME = "e4d83345-7cf9-43df-910b-1f29eef9215a"
+HEADER_IMAGE_BASENAME = "4cb39212-8ac7-44db-a2ec-07f7cff0ff5e"
 
 
 def get_header_image_path():
@@ -1230,7 +1230,46 @@ def render_map(rows, height=650):
     st.caption("Purple >30 kt • Red 20–30 kt • Orange 15–20 kt • Yellow ≤15 kt • White line = runway • Blue arrow = wind toward airport")
 
 def render_search_panel(active_airports, airport_lookup, runway_ends_by_icao, min_len, compact=False, phone=False, side_by_side_charts=True):
-    st.markdown("### Airport Search")
+    if phone:
+        st.markdown(
+            """
+            <style>
+                div[data-testid="stTextInput"] input {
+                    font-size: 12px !important;
+                    padding: 0.22rem 0.38rem !important;
+                    min-height: 1.75rem !important;
+                }
+                div[data-testid="stSelectbox"] * {
+                    font-size: 12px !important;
+                }
+                div[data-testid="stSelectbox"] [data-baseweb="select"] > div {
+                    min-height: 1.85rem !important;
+                    padding-top: 0rem !important;
+                    padding-bottom: 0rem !important;
+                }
+                div[data-testid="stExpander"] details {
+                    padding-top: 0rem !important;
+                    padding-bottom: 0rem !important;
+                }
+                div[data-testid="stExpander"] summary {
+                    font-size: 0.78rem !important;
+                    min-height: 1.6rem !important;
+                    padding-top: 0.15rem !important;
+                    padding-bottom: 0.15rem !important;
+                }
+                .mobile-search-title {
+                    font-size: 0.84rem;
+                    font-weight: 850;
+                    margin-bottom: 0.15rem;
+                    color: #e8e8e8;
+                }
+            </style>
+            <div class="mobile-search-title">Search</div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown("### Airport Search")
 
     query = st.text_input(
         "Search ICAO, name, city, or region",
@@ -1585,6 +1624,22 @@ if st.session_state.selected_icao and not any(
     if not st.session_state.selected_airport_result:
         st.session_state.selected_icao = None
 
+
+def render_responsive_search():
+    if is_phone:
+        with st.expander("Search Airport", expanded=False):
+            render_search_panel(
+                active_airports,
+                airport_lookup,
+                runway_ends_by_icao,
+                min_len,
+                compact=True,
+                phone=True,
+                side_by_side_charts=side_by_side_charts,
+            )
+    else:
+        render_responsive_search()
+
 if layout_mode == "Wide":
     left, right = st.columns([2, 1])
 
@@ -1603,29 +1658,13 @@ if layout_mode == "Wide":
     with right:
         st.subheader("Map")
         render_map(results[:top_n], height=map_height)
-        render_search_panel(
-            active_airports,
-            airport_lookup,
-            runway_ends_by_icao,
-            min_len,
-            compact=True,
-            phone=is_phone,
-            side_by_side_charts=side_by_side_charts,
-        )
+        render_responsive_search()
 
 else:
     st.subheader("Map")
     render_map(results[:top_n], height=map_height)
 
-    render_search_panel(
-        active_airports,
-        airport_lookup,
-        runway_ends_by_icao,
-        min_len,
-        compact=True,
-        phone=is_phone,
-        side_by_side_charts=side_by_side_charts,
-    )
+    render_responsive_search()
 
     st.subheader("Global Crosswinds" if use_global else "US Crosswinds")
     render_rows(
