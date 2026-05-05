@@ -756,16 +756,16 @@ def build_results(airports, runway_ends_by_icao, min_wind, min_len):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_metar_histories_bulk(icaos_tuple, hours=24):
-    """Fetch 24-hour METAR history for many airports in batches.
+    """Fetch 24-hour METAR history for many airports in small reliable batches.
 
     Returns a dict: ICAO -> list of METAR dictionaries sorted newest first.
-    This powers the top-30 history slider without making one request per airport.
+    This function is cached, so the initial history build is the only expensive step.
     """
     icaos = [str(x).upper().strip() for x in icaos_tuple if str(x).strip()]
     histories = {icao: [] for icao in icaos}
 
-    # Historical requests are larger than current-METAR requests, so keep the
-    # batch smaller than BATCH_SIZE to avoid oversized URLs/responses.
+    # Historical responses are bigger than current METAR responses.
+    # Small batches are much more reliable on Streamlit Cloud.
     history_batch_size = 20
 
     for batch in chunks(icaos, history_batch_size):
@@ -781,7 +781,6 @@ def get_metar_histories_bulk(icaos_tuple, hours=24):
                 if icao in histories:
                     histories[icao].append(m)
         except Exception:
-            # Keep the UI usable even if one batch fails.
             continue
 
     fallback_time = pd.Timestamp("1900-01-01", tz="UTC")
@@ -861,14 +860,16 @@ def pick_observation_for_target(obs_list, target_time, max_staleness_minutes=95)
 
 
 def build_24h_ranked_snapshots(icaos_tuple, runway_ends_by_icao, min_wind, min_len, top_n=30):
-    """Return 24 ranked top-N snapshots, one for each hour from current back to 23h ago.
+    """Build 24 pre-ranked top-N lists, one for each hour back from current.
 
-    Output shape is roughly 24 x top_n. The slider only switches between these
-    prebuilt snapshots, so row/map updates stay snappy after the initial fetch.
+    This is the important performance trick:
+    - Fetch history once for the candidate pool.
+    - Calculate/rank every hourly snapshot once.
+    - Slider movement only does: results = snapshots[hour_offset].
     """
     icaos = tuple(sorted(str(x).upper().strip() for x in icaos_tuple if str(x).strip()))
     histories = get_metar_histories_bulk(icaos, hours=25)
-    now_utc = pd.Timestamp.now(tz="UTC")
+    now_utc = pd.Timestamp.now(tz="UTC").floor("h")
     snapshots = {}
 
     for hour_offset in range(24):
@@ -883,10 +884,10 @@ def build_24h_ranked_snapshots(icaos_tuple, runway_ends_by_icao, min_wind, min_l
             result = result_from_metar_snapshot(icao, m, runway_ends_by_icao, min_wind, min_len)
             if result:
                 result["history_hour_offset"] = hour_offset
+                result["snapshot_target_utc"] = target_time
                 rows.append(result)
 
-        rows = sorted(rows, key=lambda x: x["cw"], reverse=True)[:top_n]
-        snapshots[hour_offset] = rows
+        snapshots[hour_offset] = sorted(rows, key=lambda x: x["cw"], reverse=True)[:top_n]
 
     return snapshots
 
@@ -920,7 +921,7 @@ def render_history_time_badge(hour_offset, timezone_name="America/Los_Angeles"):
 
 
 def render_history_slider_controls(title_text, phone=False):
-    """Compact top-of-list time-machine switch + teal cached slider."""
+    """Top-of-list time-machine switch + teal cached slider."""
     timezone_name = get_viewer_timezone()
     st.markdown(
         """
@@ -1002,10 +1003,11 @@ def render_history_slider_controls(title_text, phone=False):
                 background-color: var(--xwind-teal) !important;
             }
             @media (max-width: 760px) {
-                .xwind-list-title { font-size: 1rem; }
+                .xwind-list-title { font-size: 1rem; padding-top:3px; }
                 .history-slider-caption { font-size:9px; margin-top:-10px; }
                 .time-machine-badge { font-size:9.2px; gap:4px; flex-wrap:wrap; }
                 .time-machine-shell { padding:5px 7px 4px 7px; }
+                div[data-testid="stToggle"] label { font-size:0.72rem !important; }
             }
         </style>
         """,
@@ -1016,8 +1018,14 @@ def render_history_slider_controls(title_text, phone=False):
     slider_pos = st.session_state.history_slider_pos
 
     if phone:
-        st.markdown(f"<div class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
-        history_enabled = st.toggle("24h history", value=st.session_state.history_mode, key="history_mode_toggle_phone")
+        # Mobile: title left, toggle right, so the toggle does not collide with
+        # the US/Global Crosswinds title.
+        c_title, c_toggle = st.columns([1.6, 0.95], gap="small")
+        with c_title:
+            st.markdown(f"<div class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
+        with c_toggle:
+            history_enabled = st.toggle("24h", value=st.session_state.history_mode, key="history_mode_toggle_phone")
+
         if history_enabled:
             current_hour_offset = 23 - int(slider_pos)
             st.markdown("<div class='time-machine-shell'>" + render_history_time_badge(current_hour_offset, timezone_name), unsafe_allow_html=True)
@@ -1032,7 +1040,8 @@ def render_history_slider_controls(title_text, phone=False):
             )
             st.markdown("<div class='history-slider-caption'><span>23h ago</span><span>Current</span></div></div>", unsafe_allow_html=True)
     else:
-        c_title, c_toggle, c_slider = st.columns([1.0, 0.34, 1.85], gap="small")
+        # Desktop/widescreen: give the slider more room than before.
+        c_title, c_toggle, c_slider = st.columns([0.95, 0.24, 2.35], gap="small")
         with c_title:
             st.markdown(f"<div class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
         with c_toggle:
@@ -1870,7 +1879,7 @@ if "use_global" not in st.session_state:
 
 
 # Bump this when the cached time-slider row shape changes.
-HISTORY_SNAPSHOT_CACHE_VERSION = "2026-05-05-candidate-pool-v4"
+HISTORY_SNAPSHOT_CACHE_VERSION = "2026-05-05-hourly-candidate-slider-v5"
 
 if st.session_state.get("history_snapshot_cache_version") != HISTORY_SNAPSHOT_CACHE_VERSION:
     for _key in [
@@ -2133,23 +2142,25 @@ def history_cache_key(active_icaos, use_global, min_wind, min_len, top_n):
 
 
 def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, top_n, live_results=None):
-    """Build the 24-hour ranking once, then keep it in st.session_state.
+    """Build and cache the 24-hour slider snapshots from a practical candidate pool.
 
-    Important: do not fetch 24h history for every airport in the whole dataset.
-    That is slow and can fail/timeout. Instead, use a practical candidate pool:
-    the strongest current crosswind airports plus any selected airport. Then
-    each slider move only swaps one prebuilt hourly list from memory.
+    We intentionally do NOT pull 24-hour history for every airport in the whole
+    dataset. That is too slow. Instead:
+      1. Use the strongest live crosswind airports as candidates.
+      2. Pull 24-hour history for that candidate pool once.
+      3. Build 24 hourly top-30 lists.
+      4. Slider movement swaps prebuilt lists instantly.
     """
     key = history_cache_key(active_icaos, use_global, min_wind, min_len, top_n)
     cache = st.session_state.history_snapshot_cache
 
     if key not in cache:
-        candidate_limit = max(int(top_n) * 4, 120)
-
+        candidate_limit = max(int(top_n) * 5, 150)
         candidates = []
         seen = set()
 
-        # Start with current ranked results. These are already sorted strongest first.
+        # Start from live ranked results. This mirrors the airports most likely
+        # to remain relevant across the last 24 hours without fetching the world.
         for row in (live_results or []):
             icao = str(row.get("icao", "")).upper().strip()
             if icao and icao not in seen:
@@ -2158,13 +2169,13 @@ def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_b
             if len(candidates) >= candidate_limit:
                 break
 
-        # Always include the selected/searched airport if there is one.
+        # Always include the current selected/search airport.
         selected = str(st.session_state.get("selected_icao") or "").upper().strip()
         if selected and selected not in seen:
             candidates.append(selected)
             seen.add(selected)
 
-        # Fallback if live results are sparse.
+        # Fallback if live winds are sparse.
         if len(candidates) < int(top_n):
             for icao in active_icaos:
                 icao = str(icao).upper().strip()
@@ -2182,7 +2193,7 @@ def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_b
             top_n=top_n,
         )
 
-        # Backfill airport metadata now so row cards and map always have lat/lon.
+        # Make every snapshot row safe for both the list and map.
         for hour_offset, rows in list(snapshots.items()):
             snapshots[hour_offset] = enrich_snapshot_rows_with_airport_metadata(rows, airport_lookup)
 
@@ -2198,7 +2209,7 @@ def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_b
 
 
 def apply_history_mode_results(history_enabled, hour_offset, live_results):
-    """Return either live results or a prebuilt hourly snapshot."""
+    """Return live results or a prebuilt hourly snapshot."""
     if not history_enabled:
         return live_results, None
 
@@ -2208,7 +2219,7 @@ def apply_history_mode_results(history_enabled, hour_offset, live_results):
             active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, top_n, live_results=live_results
         )
     else:
-        with st.spinner("Building 24-hour top-30 cache once..."):
+        with st.spinner("Building 24-hour hourly snapshot cache once..."):
             bundle = get_or_build_history_snapshot_bundle(
                 active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, top_n, live_results=live_results
             )
@@ -2216,8 +2227,8 @@ def apply_history_mode_results(history_enabled, hour_offset, live_results):
     snapshots = bundle.get("snapshots", {})
     rows = snapshots.get(int(hour_offset), [])
 
-    # If a particular hour has no valid METARs in the candidate pool, use the
-    # closest populated snapshot instead of showing a blank list/map.
+    # Some airports may not report every hour. If the exact hour is empty,
+    # fall back to the closest populated snapshot so the UI does not go blank.
     if not rows:
         available = [h for h, r in snapshots.items() if r]
         if available:
@@ -2226,6 +2237,7 @@ def apply_history_mode_results(history_enabled, hour_offset, live_results):
 
     rows = enrich_snapshot_rows_with_airport_metadata(rows, airport_lookup)
     return rows, bundle
+
 
 if layout_mode == "Wide":
     left, right = st.columns([2, 1])
