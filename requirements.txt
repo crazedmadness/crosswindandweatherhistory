@@ -3,3 +3,4 @@ pandas
 requests
 pydeck
 altair
+streamlit-js-eval
