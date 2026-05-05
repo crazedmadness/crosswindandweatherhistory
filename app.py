@@ -1188,6 +1188,15 @@ def make_wind_arrow(row, start_nm=18, end_nm=7):
     lon = float(row["lon"])
     wind_from = float(row["wind_dir"])
 
+    speed = row.get("wind_speed", 10) or 10
+    gust = row.get("gust", 0) or 0
+
+    scale = max(0.6, min(speed / 20, 2.2))
+    start_nm = 10 * scale
+    end_nm = 3 * scale
+
+    thickness = 2 + (gust / 20)
+
     start_lat, start_lon = offset_point(lat, lon, wind_from, start_nm)
     end_lat, end_lon = offset_point(lat, lon, wind_from, end_nm)
 
@@ -1205,6 +1214,7 @@ def make_wind_arrow(row, start_nm=18, end_nm=7):
         "right_lon": right_lon,
         "right_lat": right_lat,
         "wind_color": [90, 190, 255, 235],
+        "thickness": thickness,
     }
 
 
@@ -1243,9 +1253,9 @@ def render_map(rows, height=650):
 
     if not wind_df.empty:
         layers.extend([
-            pdk.Layer("LineLayer", data=wind_df, get_source_position="[wind_start_lon, wind_start_lat]", get_target_position="[wind_end_lon, wind_end_lat]", get_color="wind_color", get_width=3, width_min_pixels=2, width_max_pixels=5),
-            pdk.Layer("LineLayer", data=wind_df, get_source_position="[left_lon, left_lat]", get_target_position="[wind_end_lon, wind_end_lat]", get_color="wind_color", get_width=3, width_min_pixels=2, width_max_pixels=5),
-            pdk.Layer("LineLayer", data=wind_df, get_source_position="[right_lon, right_lat]", get_target_position="[wind_end_lon, wind_end_lat]", get_color="wind_color", get_width=3, width_min_pixels=2, width_max_pixels=5),
+            pdk.Layer("LineLayer", data=wind_df, get_source_position="[wind_start_lon, wind_start_lat]", get_target_position="[wind_end_lon, wind_end_lat]", get_color="wind_color", get_width="thickness", width_min_pixels=2, width_max_pixels=5),
+            pdk.Layer("LineLayer", data=wind_df, get_source_position="[left_lon, left_lat]", get_target_position="[wind_end_lon, wind_end_lat]", get_color="wind_color", get_width="thickness", width_min_pixels=2, width_max_pixels=5),
+            pdk.Layer("LineLayer", data=wind_df, get_source_position="[right_lon, right_lat]", get_target_position="[wind_end_lon, wind_end_lat]", get_color="wind_color", get_width="thickness", width_min_pixels=2, width_max_pixels=5),
         ])
 
     layers.append(pdk.Layer("ScatterplotLayer", data=df, get_position="[lon, lat]", get_radius="radius", get_fill_color="color", get_line_color=[255, 255, 255, 220], line_width_min_pixels=1, radius_min_pixels=4, radius_max_pixels=8, pickable=True))
@@ -1275,7 +1285,7 @@ def render_map(rows, height=650):
     deck = pdk.Deck(
         layers=layers,
         initial_view_state=view_state,
-        map_style="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+        map_style="https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json",
         tooltip={
             "html": """
             <b>{icao}</b><br/>
