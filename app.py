@@ -22,28 +22,6 @@ CLOSED_RUNWAYS = {
 
 st.set_page_config(page_title="Crosswind and Weather History", layout="wide")
 
-
-# Restore scroll position after the custom timeline iframe changes the selected hour.
-# This makes mobile/iPad feel much less like the entire page jumped away.
-st.markdown(
-    """
-    <script>
-    (function() {
-        try {
-            const storedY = window.sessionStorage.getItem("xwind_scroll_y");
-            if (storedY !== null) {
-                window.sessionStorage.removeItem("xwind_scroll_y");
-                setTimeout(function() {
-                    window.scrollTo({ top: Math.max(0, Number(storedY) || 0), behavior: "instant" });
-                }, 80);
-            }
-        } catch (e) {}
-    })();
-    </script>
-    """,
-    unsafe_allow_html=True,
-)
-
 if "selected_icao" not in st.session_state:
     st.session_state.selected_icao = None
 
@@ -74,6 +52,8 @@ except Exception:
     pass
 
 # Keep the custom timeline scrubber state alive across URL-driven reruns.
+# The real Streamlit toggle still owns history_mode, but the query param
+# restores it after iframe/iPad full-page reloads caused by hour clicks.
 try:
     qp_history_mode = st.query_params.get("history_mode", None)
     if isinstance(qp_history_mode, list):
@@ -956,10 +936,12 @@ def render_history_time_badge(hour_offset, timezone_name="America/Los_Angeles"):
 
 
 def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Angeles", phone=False, key_prefix="timeline", active=False):
-    """Render a custom JS timeline scrubber with a fixed center marker.
+    """Render the custom JS timeline scrubber with a fixed center marker.
 
-    The timeline slides behind the center marker. It updates Streamlit by
-    changing URL query params. The 24h toggle lives inside the box once open.
+    The in-box 24h pill is visible and clickable. It writes history_mode/history_hour
+    into the URL so Streamlit restores state on iPad/Safari reloads. Hour changes also
+    preserve mode and selected airport. Mobile saves/restores scroll position so the
+    page returns to the slider instead of jumping to the top.
     """
     try:
         hour_offset = int(hour_offset)
@@ -1127,9 +1109,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                     will-change:transform;
                     transition:transform 520ms cubic-bezier(.17, .89, .28, 1.22);
                 }}
-                .viewport.dragging .rail {{
-                    transition:none;
-                }}
+                .viewport.dragging .rail {{ transition:none; }}
                 .chip {{
                     flex:0 0 auto;
                     width:68px;
@@ -1237,23 +1217,9 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                 }}
                 @media (max-width:760px) {{
                     .shell {{ height:104px; border-radius:14px; }}
-                    .inside-toggle {{
-                        left:7px;
-                        top:7px;
-                        font-size:8px;
-                        padding-right:6px;
-                    }}
-                    .inside-toggle .knob {{
-                        width:13px;
-                        height:13px;
-                    }}
-                    .top {{
-                        font-size:9.2px;
-                        gap:5px;
-                        padding-left:52px;
-                        padding-right:5px;
-                        justify-content:flex-start;
-                    }}
+                    .inside-toggle {{ left:7px; top:7px; font-size:8px; padding-right:6px; }}
+                    .inside-toggle .knob {{ width:13px; height:13px; }}
+                    .top {{ font-size:9.2px; gap:5px; padding-left:52px; padding-right:5px; justify-content:flex-start; }}
                     .timebits {{ gap:6px; }}
                     .chip {{ width:56px; margin:0 3px; }}
                     .chip .age {{ font-size:11.5px; }}
@@ -1265,7 +1231,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
         <body>
             <div class="shell" id="shell">
                 <button class="inside-toggle" id="insideToggle" title="Toggle 24 hour history">
-                    <span class="knob"></span><span>24h</span>
+                    <span class="knob"></span><span id="toggleText">24h</span>
                 </button>
                 <div class="top">
                     <span class="pill" id="agePill">NOW</span>
@@ -1275,16 +1241,10 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                     </span>
                 </div>
                 <div class="hint">drag / wheel</div>
-                <div class="viewport" id="viewport">
-                    <div class="rail" id="rail"></div>
-                </div>
+                <div class="viewport" id="viewport"><div class="rail" id="rail"></div></div>
                 <div class="glow"></div>
                 <div class="marker"></div>
-                <div class="bottom">
-                    <span>23h ago</span>
-                    <span>fixed marker</span>
-                    <span>current</span>
-                </div>
+                <div class="bottom"><span>23h ago</span><span>fixed marker</span><span>current</span></div>
             </div>
 
             <script>
@@ -1298,6 +1258,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                 const utcLabel = document.getElementById("utcLabel");
                 const localLabel = document.getElementById("localLabel");
                 const insideToggle = document.getElementById("insideToggle");
+                const toggleText = document.getElementById("toggleText");
                 const shell = document.getElementById("shell");
 
                 labels.forEach(item => {{
@@ -1309,25 +1270,18 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                     rail.appendChild(div);
                 }});
 
-                function selectedIndexFromOffset(offset) {{
-                    return labels.findIndex(x => Number(x.offset) === Number(offset));
-                }}
-
-                function offsetFromIndex(index) {{
-                    index = Math.max(0, Math.min(labels.length - 1, index));
-                    return Number(labels[index].offset);
-                }}
+                function selectedIndexFromOffset(offset) {{ return labels.findIndex(x => Number(x.offset) === Number(offset)); }}
+                function offsetFromIndex(index) {{ index = Math.max(0, Math.min(labels.length - 1, index)); return Number(labels[index].offset); }}
 
                 function updateLabels() {{
                     const item = labels.find(x => Number(x.offset) === Number(selectedOffset)) || labels[labels.length - 1];
                     agePill.textContent = item.offset === 0 ? "CURRENT" : `${{item.offset}}H AGO`;
                     utcLabel.textContent = item.utc;
                     localLabel.textContent = item.local;
+                    toggleText.textContent = historyActive ? "24h ON" : "24h OFF";
                     insideToggle.classList.toggle("off", !historyActive);
                     shell.classList.toggle("off", !historyActive);
-                    [...rail.children].forEach(chip => {{
-                        chip.classList.toggle("active", Number(chip.dataset.offset) === Number(selectedOffset));
-                    }});
+                    [...rail.children].forEach(chip => chip.classList.toggle("active", Number(chip.dataset.offset) === Number(selectedOffset)));
                 }}
 
                 function centerSelected(animate=true) {{
@@ -1339,33 +1293,17 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                     updateLabels();
                 }}
 
-                function setParamsAndReload(modeValue, hourValue) {{
-                    const url = new URL(window.parent.location.href);
-                    const nextMode = modeValue ? "1" : "0";
-                    const nextHour = String(hourValue);
-
-                    // Keep the Streamlit-side history toggle ON while changing hours.
-                    // The old iframe reload path could drop this on iPad/iPhone.
-                    url.searchParams.set("history_mode", nextMode);
-                    url.searchParams.set("history_hour", nextHour);
-
-                    // Cache-bust the URL so desktop browsers do not visually move the
-                    // scrubber while leaving Python on the previous hour.
-                    url.searchParams.set("history_tick", String(Date.now()));
-
-                    // Preserve the current page position so mobile returns to the slider/list
-                    // instead of flashing back to the top of the app.
-                    try {{
-                        window.parent.sessionStorage.setItem("xwind_scroll_y", String(window.parent.scrollY || 0));
-                    }} catch (e) {{}}
-
-                    window.parent.location.replace(url.toString());
+                function saveScroll() {{
+                    try {{ window.parent.sessionStorage.setItem("xwind_scroll_y", String(window.parent.scrollY || 0)); }} catch (e) {{}}
                 }}
 
-                function pushToStreamlit() {{
-                    if (historyActive) {{
-                        setParamsAndReload(true, selectedOffset);
-                    }}
+                function setParamsAndReload(modeValue, hourValue) {{
+                    saveScroll();
+                    const url = new URL(window.parent.location.href);
+                    url.searchParams.set("history_mode", modeValue ? "1" : "0");
+                    url.searchParams.set("history_hour", String(hourValue));
+                    // Preserve current selected airport/search params automatically by editing current URL only.
+                    window.parent.location.href = url.toString();
                 }}
 
                 insideToggle.addEventListener("click", (e) => {{
@@ -1373,42 +1311,25 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                     e.stopPropagation();
                     const nextValue = !historyActive;
                     if (nextValue) {{
-                        insideToggle.querySelector("span:last-child").textContent = "LOADING";
+                        toggleText.textContent = "LOADING";
                         agePill.textContent = "LOADING";
                     }}
                     setParamsAndReload(nextValue, selectedOffset);
                 }});
 
                 let commitTimer = null;
+                function pushToStreamlit() {{ if (historyActive) setParamsAndReload(true, selectedOffset); }}
+
                 function selectOffset(offset, commit=false) {{
                     if (!historyActive) return;
                     selectedOffset = Math.max(0, Math.min(23, Number(offset)));
                     centerSelected(true);
-                    if (commit) {{
-                        clearTimeout(commitTimer);
-                        commitTimer = setTimeout(pushToStreamlit, 260);
-                    }}
+                    if (commit) {{ clearTimeout(commitTimer); commitTimer = setTimeout(pushToStreamlit, 160); }}
                 }}
 
-                let startX = 0;
-                let startIdx = 0;
-                let dragging = false;
-                let moved = false;
-
-                function clientX(e) {{
-                    if (e.touches && e.touches.length) return e.touches[0].clientX;
-                    return e.clientX;
-                }}
-
-                function startDrag(e) {{
-                    if (!historyActive) return;
-                    dragging = true;
-                    moved = false;
-                    viewport.classList.add("dragging");
-                    startX = clientX(e);
-                    startIdx = selectedIndexFromOffset(selectedOffset);
-                }}
-
+                let startX = 0, startIdx = 0, dragging = false, moved = false;
+                function clientX(e) {{ if (e.touches && e.touches.length) return e.touches[0].clientX; return e.clientX; }}
+                function startDrag(e) {{ if (!historyActive) return; dragging = true; moved = false; viewport.classList.add("dragging"); startX = clientX(e); startIdx = selectedIndexFromOffset(selectedOffset); }}
                 function moveDrag(e) {{
                     if (!dragging) return;
                     const dx = clientX(e) - startX;
@@ -1416,35 +1337,26 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                     const idxFloat = startIdx - (dx / chipW);
                     const idx = Math.max(0, Math.min(labels.length - 1, idxFloat));
                     const vw = viewport.clientWidth;
-                    const x = (vw / 2) - (idx * chipW) - (chipW / 2);
                     rail.style.transition = "none";
-                    rail.style.transform = `translateX(${{x}}px)`;
-
-                    const nearestIdx = Math.round(idx);
-                    selectedOffset = offsetFromIndex(nearestIdx);
+                    rail.style.transform = `translateX(${{(vw / 2) - (idx * chipW) - (chipW / 2)}}px)`;
+                    selectedOffset = offsetFromIndex(Math.round(idx));
                     updateLabels();
                     e.preventDefault();
                 }}
-
                 function endDrag() {{
                     if (!dragging) return;
                     dragging = false;
                     viewport.classList.remove("dragging");
                     centerSelected(true);
-                    if (moved) {{
-                        clearTimeout(commitTimer);
-                        commitTimer = setTimeout(pushToStreamlit, 300);
-                    }}
+                    if (moved) {{ clearTimeout(commitTimer); commitTimer = setTimeout(pushToStreamlit, 220); }}
                 }}
 
                 viewport.addEventListener("mousedown", startDrag);
                 window.addEventListener("mousemove", moveDrag);
                 window.addEventListener("mouseup", endDrag);
-
                 viewport.addEventListener("touchstart", startDrag, {{passive:false}});
                 viewport.addEventListener("touchmove", moveDrag, {{passive:false}});
                 viewport.addEventListener("touchend", endDrag);
-
                 viewport.addEventListener("wheel", (e) => {{
                     e.preventDefault();
                     if (!historyActive) return;
@@ -1465,7 +1377,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
 
 
 def render_history_slider_controls(title_text, phone=False, show_title=True):
-    """Always-visible timeline scrubber."""
+    """Always-visible custom timeline scrubber with a reliable visible ON/OFF control."""
     timezone_name = get_viewer_timezone()
 
     try:
@@ -1487,39 +1399,54 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
     st.markdown(
         """
         <style>
-            :root {
-                --xwind-teal:#12d6cb;
-                --xwind-teal-soft:rgba(18,214,203,0.18);
-                --xwind-teal-mid:rgba(18,214,203,0.42);
-            }
-            .xwind-list-title {
-                font-size: 1.28rem;
-                line-height: 1.05;
-                font-weight: 900;
-                margin: 0rem 0 0.05rem 0;
-            }
-            .global-under-title {
-                margin-top:-2px;
-                margin-bottom:2px;
-            }
-            .global-under-title div[data-testid="stCheckbox"] label {
-                font-size: 0.76rem !important;
-                font-weight: 850 !important;
-                white-space: nowrap !important;
-            }
-            @media (max-width: 760px) {
-                .xwind-list-title { font-size: 1rem; padding-top:0px; }
-            }
+            :root { --xwind-teal:#12d6cb; --xwind-teal-soft:rgba(18,214,203,0.18); --xwind-teal-mid:rgba(18,214,203,0.42); }
+            .xwind-list-title { font-size: 1.28rem; line-height: 1.05; font-weight: 900; margin: 0rem 0 0.05rem 0; }
+            .history-checkbox-row { margin-top:-6px; margin-bottom:2px; }
+            .history-checkbox-row div[data-testid="stCheckbox"] label { font-size:0.74rem !important; font-weight:900 !important; white-space:nowrap !important; }
+            .global-under-title { margin-top:-2px; margin-bottom:2px; }
+            .global-under-title div[data-testid="stCheckbox"] label { font-size: 0.76rem !important; font-weight: 850 !important; white-space: nowrap !important; }
+            @media (max-width: 760px) { .xwind-list-title { font-size: 1rem; padding-top:0px; } }
         </style>
+        <script>
+            setTimeout(function() {
+                try {
+                    const y = window.sessionStorage.getItem("xwind_scroll_y");
+                    if (y !== null) {
+                        window.sessionStorage.removeItem("xwind_scroll_y");
+                        window.scrollTo({top: parseInt(y, 10) || 0, behavior: "instant"});
+                    }
+                } catch (e) {}
+            }, 80);
+        </script>
         """,
         unsafe_allow_html=True,
     )
 
-    history_enabled = bool(st.session_state.get("history_mode", False))
-    hour_offset = int(st.session_state.get("history_hour_offset", 0))
-
     if show_title:
         st.markdown(f"<div class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
+
+    # Compatible fallback: checkbox exists in every Streamlit version where st.toggle may not.
+    st.markdown("<div class='history-checkbox-row'>", unsafe_allow_html=True)
+    checkbox_value = st.checkbox(
+        "24h history slider",
+        value=bool(st.session_state.get("history_mode", False)),
+        key="history_mode_checkbox",
+        help="Build/cache the 24-hour Top 30 history. The slider below changes the selected hour.",
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    if checkbox_value != bool(st.session_state.get("history_mode", False)):
+        st.session_state.history_mode = bool(checkbox_value)
+        try:
+            st.query_params["history_mode"] = "1" if checkbox_value else "0"
+            st.query_params["history_hour"] = str(int(st.session_state.get("history_hour_offset", 0)))
+        except Exception:
+            pass
+        st.rerun()
+
+    history_enabled = bool(st.session_state.get("history_mode", False))
+    hour_offset = int(st.session_state.get("history_hour_offset", 0))
+    hour_offset = max(0, min(23, hour_offset))
 
     render_history_timeline_scrubber(
         hour_offset,
@@ -1529,12 +1456,10 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
         active=history_enabled,
     )
 
-    st.session_state.history_mode = history_enabled
     st.session_state.history_hour_offset = hour_offset
     st.session_state.history_slider_pos = 23 - hour_offset
 
     return history_enabled, hour_offset
-
 
 def build_history_table(icao, runway_ends_by_icao, min_len, hours=24, timezone_name="America/Los_Angeles"):
     history = get_metar_history(icao, hours=hours)
@@ -2348,7 +2273,7 @@ if "global_toggle_top" not in st.session_state:
 
 
 # Bump this when the cached time-slider row shape changes.
-HISTORY_SNAPSHOT_CACHE_VERSION = "2026-05-05-hourly-all-active-slider-v6"
+HISTORY_SNAPSHOT_CACHE_VERSION = "2026-05-05-visible-toggle-full-us-history-v6"
 
 if st.session_state.get("history_snapshot_cache_version") != HISTORY_SNAPSHOT_CACHE_VERSION:
     for _key in [
@@ -2611,43 +2536,49 @@ def history_cache_key(active_icaos, use_global, min_wind, min_len, top_n):
 
 
 def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, top_n, live_results=None):
+    """Build/cache the 24-hour history bundle.
+
+    Important: this now uses the full active airport set for US mode so the PC
+    historical list can truly change by hour. The old Top-30-only candidate pool
+    was fast, but it kept desktop looking like the current-hour list forever.
+    Global mode still caps candidates for reliability unless the active airport
+    set is already modest.
+    """
     if "history_snapshot_cache" not in st.session_state:
         st.session_state.history_snapshot_cache = {}
 
-    """Build/cache the 24-hour history bundle for the Top 30 candidate airports."""
     key = history_cache_key(active_icaos, use_global, min_wind, min_len, top_n)
     cache = st.session_state.get("history_snapshot_cache", {})
     st.session_state.history_snapshot_cache = cache
 
     if key not in cache:
-        # Build the hourly rankings from the full active airport set, not just
-        # the current Top 30. Using only the current Top 30 makes desktop appear
-        # "stuck" on the same airports at every hour.
-        # US mode is usually small enough to scan fully. Global mode is capped
-        # to avoid huge first-load delays on Streamlit Cloud.
+        all_active = [str(x).upper().strip() for x in active_icaos if str(x).strip()]
+
         if use_global:
-            candidate_limit = min(len(active_icaos), 900)
+            # Global can be enormous. Use a broad pool but avoid locking up the app.
+            candidate_limit = max(150, min(350, int(top_n) * 8))
+            candidates = []
+            seen = set()
+            for row in (live_results or []):
+                icao = str(row.get("icao", "")).upper().strip()
+                if icao and icao not in seen:
+                    candidates.append(icao)
+                    seen.add(icao)
+                if len(candidates) >= candidate_limit:
+                    break
+            for icao in all_active:
+                if icao and icao not in seen:
+                    candidates.append(icao)
+                    seen.add(icao)
+                if len(candidates) >= candidate_limit:
+                    break
         else:
-            candidate_limit = len(active_icaos)
+            # US mode is the normal view and is small enough to scan accurately.
+            candidates = all_active
 
-        candidates = []
-        seen = set()
-
-        # Always include the current selected/search airport first.
         selected = str(st.session_state.get("selected_icao") or "").upper().strip()
-        if selected:
+        if selected and selected not in candidates:
             candidates.append(selected)
-            seen.add(selected)
-
-        # Then scan the full active airport list so each hour can produce a true
-        # Top 30 for that hour instead of being limited to today's current Top 30.
-        for icao in active_icaos:
-            icao = str(icao).upper().strip()
-            if icao and icao not in seen:
-                candidates.append(icao)
-                seen.add(icao)
-            if len(candidates) >= candidate_limit:
-                break
 
         snapshots = build_24h_ranked_snapshots(
             tuple(candidates),
@@ -2657,7 +2588,6 @@ def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_b
             top_n=top_n,
         )
 
-        # Make every snapshot row safe for both the list and map.
         for hour_offset, rows in list(snapshots.items()):
             snapshots[hour_offset] = enrich_snapshot_rows_with_airport_metadata(rows, airport_lookup)
 
