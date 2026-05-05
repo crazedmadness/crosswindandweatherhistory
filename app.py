@@ -879,13 +879,7 @@ def pick_observation_for_target(obs_list, target_time, max_staleness_minutes=95)
 
 
 def build_24h_ranked_snapshots(icaos_tuple, runway_ends_by_icao, min_wind, min_len, top_n=30):
-    """Build 24 pre-ranked top-N lists, one for each hour back from current.
-
-    This is the important performance trick:
-    - Fetch history once for the candidate pool.
-    - Calculate/rank every hourly snapshot once.
-    - Slider movement only does: results = snapshots[hour_offset].
-    """
+    """Build 24 hourly ranked snapshots."""
     icaos = tuple(sorted(str(x).upper().strip() for x in icaos_tuple if str(x).strip()))
     histories = get_metar_histories_bulk(icaos, hours=25)
     now_utc = pd.Timestamp.now(tz="UTC").floor("h")
@@ -1316,13 +1310,20 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                 }}
 
                 function pushToStreamlit() {{
-                    setParamsAndReload(true, selectedOffset);
+                    if (historyActive) {{
+                        setParamsAndReload(true, selectedOffset);
+                    }}
                 }}
 
                 insideToggle.addEventListener("click", (e) => {{
                     e.preventDefault();
                     e.stopPropagation();
-                    setParamsAndReload(false, selectedOffset);
+                    const nextValue = !historyActive;
+                    if (nextValue) {{
+                        insideToggle.querySelector("span:last-child").textContent = "BUILDING...";
+                        agePill.textContent = "BUILDING";
+                    }}
+                    setParamsAndReload(nextValue, selectedOffset);
                 }});
 
                 let commitTimer = null;
@@ -1408,11 +1409,7 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
 
 
 def render_history_slider_controls(title_text, phone=False, show_title=True):
-    """Always-visible timeline scrubber.
-
-    The 24h button inside the scrubber controls whether cached hourly history
-    is active. When inactive, the scrubber is only a preview and the list stays live.
-    """
+    """Always-visible timeline scrubber."""
     timezone_name = get_viewer_timezone()
 
     try:
@@ -2561,14 +2558,14 @@ def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_b
     if "history_snapshot_cache" not in st.session_state:
         st.session_state.history_snapshot_cache = {}
 
-    """Build and cache the 24-hour slider snapshots from a practical candidate pool.
+    """
 
     We intentionally do NOT pull 24-hour history for every airport in the whole
     dataset. That is too slow. Instead:
-      1. Use the strongest live crosswind airports as candidates.
-      2. Pull 24-hour history for that candidate pool once.
-      3. Build 24 hourly top-30 lists.
-      4. Slider movement swaps prebuilt lists instantly.
+      1. 
+      2. 
+      3. 
+      4. 
     """
     key = history_cache_key(active_icaos, use_global, min_wind, min_len, top_n)
     cache = st.session_state.get("history_snapshot_cache", {})
