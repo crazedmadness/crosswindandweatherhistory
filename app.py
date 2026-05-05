@@ -75,7 +75,7 @@ def get_color(cw):
         return ("#777777", [120, 120, 120, 180])
 
     if cw > 30:
-        return ("#006a80", [0, 106, 128, 245])   # dark teal (extreme)
+        return ("#760299", [118, 2, 153, 245])   # purple (extreme)
     elif cw > 20:
         return ("#ff4d6d", [255, 77, 109, 230])  # red
     elif cw > 15:
@@ -1179,8 +1179,7 @@ def render_map(rows, height=650):
     )
 
     st.pydeck_chart(deck, use_container_width=True, height=height)
-    st.caption("Teal >30 kt • Red 20–30 kt • Orange 15–20 kt • Yellow ≤15 kt • White line = runway • Blue arrow = wind toward airport")
-
+    st.caption("Purple >30 kt • Red 20–30 kt • Orange 15–20 kt • Yellow ≤15 kt • White line = runway • Blue arrow = wind toward airport")
 
 def render_search_panel(active_airports, airport_lookup, runway_ends_by_icao, min_len, compact=False, phone=False, side_by_side_charts=True):
     st.markdown("### Airport Search")
@@ -1351,8 +1350,8 @@ def render_top_header_controls(phone=False, tablet=False):
             div[role="radiogroup"] { flex-direction: row !important; gap: 0.20rem !important; flex-wrap: nowrap !important; }
             div[role="radiogroup"] label { white-space: nowrap !important; padding: 0rem 0.05rem !important; font-size: 0.72rem !important; }
             div[data-testid="stCheckbox"] label { white-space: nowrap !important; font-size: 0.72rem !important; }
-            div[data-testid="stPopover"] button { padding: 0.12rem 0.25rem !important; min-height: 1.45rem !important; font-size: 0.68rem !important; }
-            button[kind="secondary"] { padding: 0.12rem 0.25rem !important; min-height: 1.45rem !important; font-size: 0.70rem !important; }
+            div[data-testid="stPopover"] button { padding: 0.08rem 0.22rem !important; min-height: 1.35rem !important; font-size: 0.66rem !important; }
+            button[kind="secondary"] { padding: 0.08rem 0.22rem !important; min-height: 1.35rem !important; font-size: 0.66rem !important; }
             .last-updated {
                 text-align: right;
                 color: #aaa;
@@ -1429,42 +1428,41 @@ def render_top_header_controls(phone=False, tablet=False):
         )
         return min_len_value, top_n_value, layout_value, global_value, refresh_value
 
-    # Tablet/desktop: a single short horizontal toolbar.
-    c1, c2, c3, c4, c5 = st.columns([0.72, 0.68, 1.24, 0.60, 0.62], gap="small")
-
-    with c1:
-        with st.popover("Runway", use_container_width=True):
+    # Tablet/desktop: keep controls tucked into one compact dropdown so the header stays clean.
+    with st.popover("Options ▾", use_container_width=True):
+        c1, c2 = st.columns(2, gap="small")
+        with c1:
             min_len_value = st.slider(
-                "Min runway length",
+                "Runway ft",
                 min_value=0,
                 max_value=12000,
                 value=st.session_state.min_len,
                 step=500,
                 key="min_len_header",
             )
-    with c2:
-        with st.popover("Rows", use_container_width=True):
+        with c2:
             top_n_value = st.slider(
-                "Results",
+                "Rows",
                 min_value=5,
                 max_value=100,
                 value=st.session_state.top_n,
                 step=5,
                 key="top_n_header",
             )
-    with c3:
-        layout_value = st.radio(
-            "Layout",
-            ["Wide", "Stacked"],
-            horizontal=True,
-            label_visibility="collapsed",
-            index=0 if default_layout == "Wide" else 1,
-            key="layout_header",
-        )
-    with c4:
-        global_value = st.checkbox("Global", value=st.session_state.use_global, key="global_header")
-    with c5:
-        refresh_value = st.button("Refresh" if not tablet else "↻", key="refresh_header", use_container_width=True)
+
+        c3, c4, c5 = st.columns([1.2, 0.75, 0.65], gap="small")
+        with c3:
+            layout_value = st.radio(
+                "Layout",
+                ["Wide", "Stacked"],
+                horizontal=True,
+                index=0 if default_layout == "Wide" else 1,
+                key="layout_header",
+            )
+        with c4:
+            global_value = st.checkbox("Global", value=st.session_state.use_global, key="global_header")
+        with c5:
+            refresh_value = st.button("Refresh" if not tablet else "↻", key="refresh_header", use_container_width=True)
 
     st.markdown(
         f"<div class='last-updated'>Last updated: {last_updated_text}</div>",
@@ -1480,7 +1478,7 @@ if is_phone:
     st.markdown('</div>', unsafe_allow_html=True)
     min_len, top_n, layout_mode, use_global, refresh = render_top_header_controls(phone=True)
 elif is_tablet:
-    header_left, header_right = st.columns([0.95, 2.05], gap="small")
+    header_left, header_right = st.columns([1.55, 0.75], gap="small")
     with header_left:
         st.markdown('<div class="tablet-title">', unsafe_allow_html=True)
         st.title("Crosswind and Weather History")
@@ -1489,7 +1487,7 @@ elif is_tablet:
     with header_right:
         min_len, top_n, layout_mode, use_global, refresh = render_top_header_controls(phone=False, tablet=True)
 else:
-    header_left, header_right = st.columns([1.55, 1.45], gap="small")
+    header_left, header_right = st.columns([2.35, 0.65], gap="small")
     with header_left:
         st.title("Crosswind and Weather History")
         st.caption("Crosswinds color-coded by strength. Click an ICAO ▾ or search airport to zoom the map.")
