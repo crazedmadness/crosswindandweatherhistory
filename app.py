@@ -51,9 +51,16 @@ try:
 except Exception:
     pass
 
-# Keep the custom timeline scrubber hour alive across URL-driven reruns.
-# Important: history_mode is controlled by a real Streamlit toggle, not the iframe.
+# Keep the custom timeline scrubber state alive across URL-driven reruns.
+# The real Streamlit toggle still owns history_mode, but the query param
+# restores it after iframe/iPad full-page reloads caused by hour clicks.
 try:
+    qp_history_mode = st.query_params.get("history_mode", None)
+    if isinstance(qp_history_mode, list):
+        qp_history_mode = qp_history_mode[0] if qp_history_mode else None
+    if qp_history_mode is not None:
+        st.session_state.history_mode = str(qp_history_mode).lower() in {"1", "true", "yes", "on"}
+
     qp_history_hour = st.query_params.get("history_hour", None)
     if isinstance(qp_history_hour, list):
         qp_history_hour = qp_history_hour[0] if qp_history_hour else None
@@ -1314,28 +1321,34 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
                     updateLabels();
                 }}
 
-                function setParamsAndReload(modeValue, hourValue) {{
+                function setHourAndReload(hourValue) {{
                     const url = new URL(window.parent.location.href);
-                    url.searchParams.set("history_mode", modeValue ? "1" : "0");
+                    // Critical for iPad/Safari: a component navigation can create a fresh
+                    // Streamlit session. Keep the mode in the URL so Python restores it.
+                    url.searchParams.set("history_mode", historyActive ? "1" : "0");
                     url.searchParams.set("history_hour", String(hourValue));
                     window.parent.location.assign(url.toString());
                 }}
 
                 function pushToStreamlit() {{
                     if (historyActive) {{
-                        setParamsAndReload(true, selectedOffset);
+                        setHourAndReload(selectedOffset);
                     }}
                 }}
 
                 insideToggle.addEventListener("click", (e) => {{
                     e.preventDefault();
                     e.stopPropagation();
-                    const nextValue = !historyActive;
-                    if (nextValue) {{
+                    // The actual ON/OFF state is owned by the native Streamlit toggle
+                    // above the scrubber. This in-box pill is visual only once active.
+                    if (!historyActive) {{
+                        const url = new URL(window.parent.location.href);
+                        url.searchParams.set("history_mode", "1");
+                        url.searchParams.set("history_hour", String(selectedOffset));
                         insideToggle.querySelector("span:last-child").textContent = "LOADING";
                         agePill.textContent = "LOADING";
+                        window.parent.location.assign(url.toString());
                     }}
-                    setParamsAndReload(nextValue, selectedOffset);
                 }});
 
                 let commitTimer = null;
