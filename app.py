@@ -766,13 +766,13 @@ def get_metar_histories_bulk(icaos_tuple, hours=24):
 
     # Historical requests are larger than current-METAR requests, so keep the
     # batch smaller than BATCH_SIZE to avoid oversized URLs/responses.
-    history_batch_size = 90
+    history_batch_size = 20
 
     for batch in chunks(icaos, history_batch_size):
         url = f"https://aviationweather.gov/api/data/metar?ids={','.join(batch)}&format=json&hours={hours}"
 
         try:
-            response = requests.get(url, timeout=30)
+            response = requests.get(url, timeout=45)
             response.raise_for_status()
             data = response.json()
 
@@ -1870,7 +1870,7 @@ if "use_global" not in st.session_state:
 
 
 # Bump this when the cached time-slider row shape changes.
-HISTORY_SNAPSHOT_CACHE_VERSION = "2026-05-05-map-safe-v2"
+HISTORY_SNAPSHOT_CACHE_VERSION = "2026-05-05-candidate-pool-v4"
 
 if st.session_state.get("history_snapshot_cache_version") != HISTORY_SNAPSHOT_CACHE_VERSION:
     for _key in [
@@ -2132,28 +2132,65 @@ def history_cache_key(active_icaos, use_global, min_wind, min_len, top_n):
     )
 
 
-def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, top_n):
+def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, top_n, live_results=None):
     """Build the 24-hour ranking once, then keep it in st.session_state.
 
-    Streamlit reruns the script every time the slider moves. The important part
-    is that this function returns the already-built dictionary immediately after
-    the first load instead of re-querying METAR history or re-ranking airports.
+    Important: do not fetch 24h history for every airport in the whole dataset.
+    That is slow and can fail/timeout. Instead, use a practical candidate pool:
+    the strongest current crosswind airports plus any selected airport. Then
+    each slider move only swaps one prebuilt hourly list from memory.
     """
     key = history_cache_key(active_icaos, use_global, min_wind, min_len, top_n)
     cache = st.session_state.history_snapshot_cache
 
     if key not in cache:
+        candidate_limit = max(int(top_n) * 4, 120)
+
+        candidates = []
+        seen = set()
+
+        # Start with current ranked results. These are already sorted strongest first.
+        for row in (live_results or []):
+            icao = str(row.get("icao", "")).upper().strip()
+            if icao and icao not in seen:
+                candidates.append(icao)
+                seen.add(icao)
+            if len(candidates) >= candidate_limit:
+                break
+
+        # Always include the selected/searched airport if there is one.
+        selected = str(st.session_state.get("selected_icao") or "").upper().strip()
+        if selected and selected not in seen:
+            candidates.append(selected)
+            seen.add(selected)
+
+        # Fallback if live results are sparse.
+        if len(candidates) < int(top_n):
+            for icao in active_icaos:
+                icao = str(icao).upper().strip()
+                if icao and icao not in seen:
+                    candidates.append(icao)
+                    seen.add(icao)
+                if len(candidates) >= candidate_limit:
+                    break
+
         snapshots = build_24h_ranked_snapshots(
-            active_icaos,
+            tuple(candidates),
             runway_ends_by_icao,
             min_wind,
             min_len,
             top_n=top_n,
         )
+
+        # Backfill airport metadata now so row cards and map always have lat/lon.
+        for hour_offset, rows in list(snapshots.items()):
+            snapshots[hour_offset] = enrich_snapshot_rows_with_airport_metadata(rows, airport_lookup)
+
         candidate_icaos = sorted({row["icao"] for rows in snapshots.values() for row in rows})
         cache[key] = {
             "snapshots": snapshots,
             "candidate_icaos": candidate_icaos,
+            "candidate_pool_size": len(candidates),
             "built_at_utc": pd.Timestamp.now(tz="UTC"),
         }
 
@@ -2168,15 +2205,27 @@ def apply_history_mode_results(history_enabled, hour_offset, live_results):
     key = history_cache_key(active_icaos, use_global, min_wind, min_len, top_n)
     if key in st.session_state.history_snapshot_cache:
         bundle = get_or_build_history_snapshot_bundle(
-            active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, top_n
+            active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, top_n, live_results=live_results
         )
     else:
         with st.spinner("Building 24-hour top-30 cache once..."):
             bundle = get_or_build_history_snapshot_bundle(
-                active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, top_n
+                active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, top_n, live_results=live_results
             )
 
-    return bundle["snapshots"].get(hour_offset, []), bundle
+    snapshots = bundle.get("snapshots", {})
+    rows = snapshots.get(int(hour_offset), [])
+
+    # If a particular hour has no valid METARs in the candidate pool, use the
+    # closest populated snapshot instead of showing a blank list/map.
+    if not rows:
+        available = [h for h, r in snapshots.items() if r]
+        if available:
+            nearest = min(available, key=lambda h: abs(int(h) - int(hour_offset)))
+            rows = snapshots.get(nearest, [])
+
+    rows = enrich_snapshot_rows_with_airport_metadata(rows, airport_lookup)
+    return rows, bundle
 
 if layout_mode == "Wide":
     left, right = st.columns([2, 1])
@@ -2185,9 +2234,10 @@ if layout_mode == "Wide":
         history_enabled, hour_offset = render_history_slider_controls(list_title, phone=is_phone)
 
         results, history_bundle = apply_history_mode_results(history_enabled, hour_offset, live_results)
+        results = enrich_snapshot_rows_with_airport_metadata(results, airport_lookup)
         if history_enabled:
             cached_count = len(history_bundle.get("candidate_icaos", [])) if history_bundle else 0
-            st.caption(f"Historical ranking: {history_offset_label(hour_offset, timezone_name)} • cached {cached_count} airports")
+            st.caption(f"Historical ranking: {history_offset_label(hour_offset, timezone_name)} • cached {cached_count} airports from {history_bundle.get(\'candidate_pool_size\', cached_count) if history_bundle else cached_count} candidates")
 
         if st.session_state.selected_icao and not any(
             r["icao"] == st.session_state.selected_icao for r in results[:top_n]
@@ -2216,9 +2266,10 @@ else:
     history_enabled, hour_offset = render_history_slider_controls(list_title, phone=is_phone)
 
     results, history_bundle = apply_history_mode_results(history_enabled, hour_offset, live_results)
+    results = enrich_snapshot_rows_with_airport_metadata(results, airport_lookup)
     if history_enabled:
         cached_count = len(history_bundle.get("candidate_icaos", [])) if history_bundle else 0
-        st.caption(f"Historical ranking: {history_offset_label(hour_offset, timezone_name)} • cached {cached_count} airports")
+        st.caption(f"Historical ranking: {history_offset_label(hour_offset, timezone_name)} • cached {cached_count} airports from {history_bundle.get(\'candidate_pool_size\', cached_count) if history_bundle else cached_count} candidates")
 
     if st.session_state.selected_icao and not any(
         r["icao"] == st.session_state.selected_icao for r in results[:top_n]
