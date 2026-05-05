@@ -838,7 +838,11 @@ def build_history_table(icao, runway_ends_by_icao, min_len, hours=24, timezone_n
 
 
 def render_history_panel(icao, runway_ends_by_icao, min_len, title="Past 24 Hours", phone=False, side_by_side_charts=True):
-    with st.expander(f"{title} — {icao}", expanded=False):
+    # Auto-open the 24-hour history for the airport currently selected from
+    # the ICAO dropdown/card/search zoom action.
+    auto_expand = str(st.session_state.get("selected_icao", "")).upper().strip() == str(icao).upper().strip()
+
+    with st.expander(f"{title} — {icao}", expanded=auto_expand):
         timezone_name = get_viewer_timezone()
         hist = build_history_table(icao, runway_ends_by_icao, min_len, hours=24, timezone_name=timezone_name)
 
