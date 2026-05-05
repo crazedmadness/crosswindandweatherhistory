@@ -71,17 +71,18 @@ is_tablet = screen_width is not None and 760 <= screen_width < 1180
 is_desktop = screen_width is None or screen_width >= 1180
 preferred_layout_mode = "Stacked" if (screen_width is not None and screen_width < 980) else "Wide"
 
-HEADER_IMAGE_BASENAME = "4cb39212-8ac7-44db-a2ec-07f7cff0ff5e"
+WIDE_HEADER_BASENAME = "19c28a51-1047-4e6d-8888-da9a8ebd1d88"
+MOBILE_HEADER_BASENAME = "4cb39212-8ac7-44db-a2ec-07f7cff0ff5e"
 
 
-def get_header_image_path():
-    """Find the banner image even if the extension differs."""
+def find_header_file(base):
+    """Find a banner image even if the extension differs."""
     candidates = [
-        HEADER_IMAGE_BASENAME,
-        f"{HEADER_IMAGE_BASENAME}.png",
-        f"{HEADER_IMAGE_BASENAME}.jpg",
-        f"{HEADER_IMAGE_BASENAME}.jpeg",
-        f"{HEADER_IMAGE_BASENAME}.webp",
+        base,
+        f"{base}.png",
+        f"{base}.jpg",
+        f"{base}.jpeg",
+        f"{base}.webp",
     ]
 
     for candidate in candidates:
@@ -91,31 +92,16 @@ def get_header_image_path():
     return None
 
 
-def render_header_image():
-WIDE_HEADER_BASENAME = "19c28a51-1047-4e6d-8888-da9a8ebd1d88"
-MOBILE_HEADER_BASENAME = "4cb39212-8ac7-44db-a2ec-07f7cff0ff5e"
-
 def get_header_image_path_for_screen():
-    def find_file(base):
-        candidates = [
-            base,
-            f"{base}.png",
-            f"{base}.jpg",
-            f"{base}.jpeg",
-            f"{base}.webp",
-        ]
-        for c in candidates:
-            if Path(c).exists():
-                return c
-        return None
+    """Use wide banner on desktop / iPad landscape and mobile banner on phones / narrow tablets."""
+    if is_desktop or (is_tablet and screen_width is not None and screen_width >= 980):
+        return find_header_file(WIDE_HEADER_BASENAME)
 
-    if is_desktop or (is_tablet and (screen_width and screen_width >= 980)):
-        return find_file(WIDE_HEADER_BASENAME)
-
-    return find_file(MOBILE_HEADER_BASENAME)
+    return find_header_file(MOBILE_HEADER_BASENAME)
 
 
 def render_header_image():
+    """Render the responsive logo/banner at the top."""
     image_path = get_header_image_path_for_screen()
 
     st.markdown("""
@@ -126,6 +112,7 @@ def render_header_image():
             margin-bottom: 0.1rem;
         }
 
+        /* Desktop + iPad landscape: very thin widescreen banner */
         div[data-testid="stImage"] img {
             width: 100%;
             height: 75px;
@@ -134,16 +121,19 @@ def render_header_image():
             border-radius: 10px;
         }
 
+        /* Tablet / iPad portrait */
         @media (max-width: 1180px) {
             div[data-testid="stImage"] img {
                 height: 85px;
             }
         }
 
+        /* Phone: use taller mobile banner without cropping */
         @media (max-width: 760px) {
             div[data-testid="stImage"] img {
                 height: 105px;
                 object-fit: contain;
+                object-position: center center;
                 border-radius: 7px;
             }
         }
@@ -153,8 +143,10 @@ def render_header_image():
     if image_path:
         st.image(image_path, use_container_width=True)
     else:
-        st.warning("Header image not found.")
-# --- paste ends here ---
+        st.warning(
+            "Header image not found. Add the wide and mobile banner PNG files to the same folder as app.py."
+        )
+
 
 def get_color(cw):
     if cw is None or pd.isna(cw):
@@ -1676,7 +1668,15 @@ def render_responsive_search():
                 side_by_side_charts=side_by_side_charts,
             )
     else:
-        render_responsive_search()
+        render_search_panel(
+            active_airports,
+            airport_lookup,
+            runway_ends_by_icao,
+            min_len,
+            compact=True,
+            phone=False,
+            side_by_side_charts=side_by_side_charts,
+        )
 
 if layout_mode == "Wide":
     left, right = st.columns([2, 1])
