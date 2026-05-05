@@ -28,6 +28,18 @@ if "selected_icao" not in st.session_state:
 if "selected_airport_result" not in st.session_state:
     st.session_state.selected_airport_result = None
 
+if "history_mode" not in st.session_state:
+    st.session_state.history_mode = False
+
+if "history_slider_pos" not in st.session_state:
+    # Slider position is 0 = 23 hours ago, 23 = current/right side.
+    st.session_state.history_slider_pos = 23
+
+if "history_snapshot_cache" not in st.session_state:
+    # Manual in-session cache so moving the slider only swaps an already-built list.
+    # This avoids re-fetching or re-ranking on every Streamlit rerun.
+    st.session_state.history_snapshot_cache = {}
+
 # Allow mobile HTML cards to select/expand an airport via query string.
 try:
     qp_selected = st.query_params.get("selected_icao", None)
@@ -739,6 +751,314 @@ def build_results(airports, runway_ends_by_icao, min_wind, min_len):
             out.append(best)
 
     return sorted(out, key=lambda x: x["cw"], reverse=True)
+
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_metar_histories_bulk(icaos_tuple, hours=24):
+    """Fetch 24-hour METAR history for many airports in batches.
+
+    Returns a dict: ICAO -> list of METAR dictionaries sorted newest first.
+    This powers the top-30 history slider without making one request per airport.
+    """
+    icaos = [str(x).upper().strip() for x in icaos_tuple if str(x).strip()]
+    histories = {icao: [] for icao in icaos}
+
+    # Historical requests are larger than current-METAR requests, so keep the
+    # batch smaller than BATCH_SIZE to avoid oversized URLs/responses.
+    history_batch_size = 90
+
+    for batch in chunks(icaos, history_batch_size):
+        url = f"https://aviationweather.gov/api/data/metar?ids={','.join(batch)}&format=json&hours={hours}"
+
+        try:
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+
+            for m in data:
+                icao = str(m.get("icaoId", "")).upper().strip()
+                if icao in histories:
+                    histories[icao].append(m)
+        except Exception:
+            # Keep the UI usable even if one batch fails.
+            continue
+
+    fallback_time = pd.Timestamp("1900-01-01", tz="UTC")
+    for icao, obs in histories.items():
+        def sort_time(m):
+            t = get_metar_observation_time(m)
+            return t if not pd.isna(t) else fallback_time
+
+        obs.sort(key=sort_time, reverse=True)
+
+    return histories
+
+
+def result_from_metar_snapshot(icao, m, runway_ends_by_icao, min_wind, min_len):
+    """Build one crosswind result row from a specific historical METAR."""
+    wind = parse_wind_from_metar(m, allow_vrb=False)
+    if wind is None:
+        return None
+
+    wind_dir, wind_spd, wind_gust, _ = wind
+
+    if wind_spd < min_wind:
+        return None
+
+    best = find_best_crosswind_runway(
+        icao,
+        runway_ends_by_icao,
+        wind_dir,
+        wind_spd,
+        wind_gust=wind_gust,
+        min_len=min_len,
+    )
+
+    if not best:
+        return None
+
+    obs_time = get_metar_observation_time(m)
+
+    best.update({
+        "wind": f"{int(wind_dir):03}/{int(wind_spd)}",
+        "gust": int(float(wind_gust)) if wind_gust is not None and not pd.isna(wind_gust) else None,
+        "wind_dir": round(wind_dir),
+        "wind_speed": round(wind_spd),
+        "raw_metar": m.get("rawOb", "—"),
+        "visibility": format_visibility(m),
+        "ceiling": format_ceiling(m),
+        "obs_time": obs_time,
+    })
+
+    return best
+
+
+def pick_observation_for_target(obs_list, target_time, max_staleness_minutes=95):
+    """Pick latest observation at/before a target hour without using very stale data."""
+    if not obs_list:
+        return None
+
+    target = pd.Timestamp(target_time)
+    if target.tzinfo is None:
+        target = target.tz_localize("UTC")
+    else:
+        target = target.tz_convert("UTC")
+
+    oldest_allowed = target - pd.Timedelta(minutes=max_staleness_minutes)
+    newest_allowed = target + pd.Timedelta(minutes=10)
+
+    for m in obs_list:
+        obs_time = get_metar_observation_time(m)
+        if pd.isna(obs_time):
+            continue
+
+        obs_time = pd.Timestamp(obs_time).tz_convert("UTC")
+        if oldest_allowed <= obs_time <= newest_allowed:
+            return m
+
+    return None
+
+
+def build_24h_ranked_snapshots(icaos_tuple, runway_ends_by_icao, min_wind, min_len, top_n=30):
+    """Return 24 ranked top-N snapshots, one for each hour from current back to 23h ago.
+
+    Output shape is roughly 24 x top_n. The slider only switches between these
+    prebuilt snapshots, so row/map updates stay snappy after the initial fetch.
+    """
+    icaos = tuple(sorted(str(x).upper().strip() for x in icaos_tuple if str(x).strip()))
+    histories = get_metar_histories_bulk(icaos, hours=25)
+    now_utc = pd.Timestamp.now(tz="UTC")
+    snapshots = {}
+
+    for hour_offset in range(24):
+        target_time = now_utc - pd.Timedelta(hours=hour_offset)
+        rows = []
+
+        for icao in icaos:
+            m = pick_observation_for_target(histories.get(icao, []), target_time)
+            if not m:
+                continue
+
+            result = result_from_metar_snapshot(icao, m, runway_ends_by_icao, min_wind, min_len)
+            if result:
+                result["history_hour_offset"] = hour_offset
+                rows.append(result)
+
+        rows = sorted(rows, key=lambda x: x["cw"], reverse=True)[:top_n]
+        snapshots[hour_offset] = rows
+
+    return snapshots
+
+
+def history_snapshot_times(hour_offset, timezone_name="America/Los_Angeles"):
+    """Return the selected snapshot time in UTC and local viewer time."""
+    ts_utc = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=int(hour_offset))
+    try:
+        ts_local = ts_utc.tz_convert(ZoneInfo(timezone_name))
+    except Exception:
+        ts_local = ts_utc.tz_convert(ZoneInfo("America/Los_Angeles"))
+    return ts_utc, ts_local
+
+
+def history_offset_label(hour_offset, timezone_name="America/Los_Angeles"):
+    ts_utc, ts_local = history_snapshot_times(hour_offset, timezone_name)
+    age = "Current" if int(hour_offset) <= 0 else f"{int(hour_offset)}h ago"
+    return f"{age} • {ts_utc.strftime('%H:%MZ')} UTC • {ts_local.strftime('%H:%M %Z')} local"
+
+
+def render_history_time_badge(hour_offset, timezone_name="America/Los_Angeles"):
+    ts_utc, ts_local = history_snapshot_times(hour_offset, timezone_name)
+    age = "CURRENT" if int(hour_offset) <= 0 else f"{int(hour_offset)}H AGO"
+    return f"""
+    <div class="time-machine-badge">
+        <span class="time-machine-age">{html.escape(age)}</span>
+        <span><b>UTC</b> {ts_utc.strftime('%H:%MZ')}</span>
+        <span><b>LOCAL</b> {ts_local.strftime('%H:%M %Z')}</span>
+    </div>
+    """
+
+
+def render_history_slider_controls(title_text, phone=False):
+    """Compact top-of-list time-machine switch + teal cached slider."""
+    timezone_name = get_viewer_timezone()
+    st.markdown(
+        """
+        <style>
+            :root {
+                --xwind-teal:#12d6cb;
+                --xwind-teal-soft:rgba(18,214,203,0.18);
+                --xwind-teal-mid:rgba(18,214,203,0.42);
+            }
+            .xwind-list-title {
+                font-size: 1.28rem;
+                line-height: 1.15;
+                font-weight: 900;
+                margin: 0.1rem 0 0.05rem 0;
+            }
+            .time-machine-shell {
+                border:1px solid rgba(18,214,203,0.28);
+                background:linear-gradient(135deg, rgba(18,214,203,0.10), rgba(255,255,255,0.025));
+                border-radius:14px;
+                padding:6px 9px 5px 9px;
+                margin-top:0px;
+                box-shadow:0 0 0 1px rgba(255,255,255,0.025) inset;
+            }
+            .time-machine-badge {
+                display:flex;
+                justify-content:space-between;
+                align-items:center;
+                gap:8px;
+                color:#d9fffd;
+                font-size:10.5px;
+                line-height:13px;
+                margin-top:-3px;
+                margin-bottom:2px;
+                white-space:nowrap;
+            }
+            .time-machine-age {
+                color:#061413;
+                background:var(--xwind-teal);
+                border-radius:999px;
+                padding:1px 7px;
+                font-weight:950;
+                letter-spacing:.3px;
+            }
+            .history-slider-caption {
+                color:#86f3ee;
+                font-size:10px;
+                margin-top:-12px;
+                display:flex;
+                justify-content:space-between;
+                opacity:.9;
+                font-weight:800;
+            }
+            div[data-testid="stToggle"] label {
+                font-size: 0.78rem !important;
+                font-weight: 900 !important;
+                white-space: nowrap !important;
+            }
+            div[data-testid="stToggle"] [data-baseweb="checkbox"] {
+                border-color: var(--xwind-teal-mid) !important;
+            }
+            div[data-testid="stSlider"] label {
+                font-size: 0.76rem !important;
+                color:#d8d8d8 !important;
+                font-weight:800 !important;
+            }
+            div[data-testid="stSlider"] { padding-top: 0rem !important; padding-bottom: 0rem !important; }
+            div[data-testid="stSlider"] [data-baseweb="slider"] div[role="slider"] {
+                background-color: var(--xwind-teal) !important;
+                border-color: var(--xwind-teal) !important;
+                box-shadow:0 0 0 4px rgba(18,214,203,0.18) !important;
+            }
+            div[data-testid="stSlider"] [data-baseweb="slider"] > div > div {
+                background-color: var(--xwind-teal) !important;
+            }
+            div[data-testid="stSlider"] [data-baseweb="slider"] > div {
+                background:rgba(255,255,255,0.14) !important;
+            }
+            div[data-testid="stSlider"] [data-baseweb="slider"] span {
+                background-color: var(--xwind-teal) !important;
+            }
+            @media (max-width: 760px) {
+                .xwind-list-title { font-size: 1rem; }
+                .history-slider-caption { font-size:9px; margin-top:-10px; }
+                .time-machine-badge { font-size:9.2px; gap:4px; flex-wrap:wrap; }
+                .time-machine-shell { padding:5px 7px 4px 7px; }
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    history_enabled = False
+    slider_pos = st.session_state.history_slider_pos
+
+    if phone:
+        st.markdown(f"<div class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
+        history_enabled = st.toggle("24h history", value=st.session_state.history_mode, key="history_mode_toggle_phone")
+        if history_enabled:
+            current_hour_offset = 23 - int(slider_pos)
+            st.markdown("<div class='time-machine-shell'>" + render_history_time_badge(current_hour_offset, timezone_name), unsafe_allow_html=True)
+            slider_pos = st.slider(
+                "Timeline",
+                min_value=0,
+                max_value=23,
+                value=st.session_state.history_slider_pos,
+                step=1,
+                key="history_slider_phone",
+                label_visibility="collapsed",
+            )
+            st.markdown("<div class='history-slider-caption'><span>23h ago</span><span>Current</span></div></div>", unsafe_allow_html=True)
+    else:
+        c_title, c_toggle, c_slider = st.columns([1.0, 0.34, 1.85], gap="small")
+        with c_title:
+            st.markdown(f"<div class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
+        with c_toggle:
+            history_enabled = st.toggle("24h", value=st.session_state.history_mode, key="history_mode_toggle")
+        with c_slider:
+            if history_enabled:
+                current_hour_offset = 23 - int(slider_pos)
+                st.markdown("<div class='time-machine-shell'>" + render_history_time_badge(current_hour_offset, timezone_name), unsafe_allow_html=True)
+                slider_pos = st.slider(
+                    "Timeline",
+                    min_value=0,
+                    max_value=23,
+                    value=st.session_state.history_slider_pos,
+                    step=1,
+                    key="history_slider",
+                    label_visibility="collapsed",
+                )
+                st.markdown("<div class='history-slider-caption'><span>23h ago</span><span>Current</span></div></div>", unsafe_allow_html=True)
+            else:
+                st.markdown("<div style='height:44px;'></div>", unsafe_allow_html=True)
+
+    st.session_state.history_mode = history_enabled
+    st.session_state.history_slider_pos = slider_pos
+    hour_offset = 23 - int(slider_pos)
+
+    return history_enabled, hour_offset
 
 
 def build_history_table(icao, runway_ends_by_icao, min_len, hours=24, timezone_name="America/Los_Angeles"):
@@ -1686,6 +2006,8 @@ else:
 if refresh:
     get_metars.clear()
     get_metar_history.clear()
+    get_metar_histories_bulk.clear()
+    st.session_state.history_snapshot_cache = {}
     st.rerun()
 
 if use_global:
@@ -1693,14 +2015,11 @@ if use_global:
 else:
     active_airports = airports[airports["iso_country"] == "US"].copy()
 
+# Live results are still loaded first so normal mode stays quick.
 with st.spinner("Loading airport winds..."):
-    results = build_results(active_airports, runway_ends_by_icao, min_wind, min_len)
+    live_results = build_results(active_airports, runway_ends_by_icao, min_wind, min_len)
 
-if st.session_state.selected_icao and not any(
-    r["icao"] == st.session_state.selected_icao for r in results[:top_n]
-):
-    if not st.session_state.selected_airport_result:
-        st.session_state.selected_icao = None
+results = live_results
 
 
 def render_responsive_search():
@@ -1726,11 +2045,93 @@ def render_responsive_search():
             side_by_side_charts=side_by_side_charts,
         )
 
+list_title = "Global Crosswinds" if use_global else "US Crosswinds"
+active_icaos = tuple(sorted(active_airports["ident"].dropna().astype(str).unique()))
+
+
+def history_cache_key(active_icaos, use_global, min_wind, min_len, top_n):
+    """Small stable key for the current history-mode inputs."""
+    if active_icaos:
+        first_icao = active_icaos[0]
+        last_icao = active_icaos[-1]
+    else:
+        first_icao = ""
+        last_icao = ""
+
+    return (
+        "global" if use_global else "us",
+        len(active_icaos),
+        first_icao,
+        last_icao,
+        int(min_wind),
+        int(min_len),
+        int(top_n),
+    )
+
+
+def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, top_n):
+    """Build the 24-hour ranking once, then keep it in st.session_state.
+
+    Streamlit reruns the script every time the slider moves. The important part
+    is that this function returns the already-built dictionary immediately after
+    the first load instead of re-querying METAR history or re-ranking airports.
+    """
+    key = history_cache_key(active_icaos, use_global, min_wind, min_len, top_n)
+    cache = st.session_state.history_snapshot_cache
+
+    if key not in cache:
+        snapshots = build_24h_ranked_snapshots(
+            active_icaos,
+            runway_ends_by_icao,
+            min_wind,
+            min_len,
+            top_n=top_n,
+        )
+        candidate_icaos = sorted({row["icao"] for rows in snapshots.values() for row in rows})
+        cache[key] = {
+            "snapshots": snapshots,
+            "candidate_icaos": candidate_icaos,
+            "built_at_utc": pd.Timestamp.now(tz="UTC"),
+        }
+
+    return cache[key]
+
+
+def apply_history_mode_results(history_enabled, hour_offset, live_results):
+    """Return either live results or a prebuilt hourly snapshot."""
+    if not history_enabled:
+        return live_results, None
+
+    key = history_cache_key(active_icaos, use_global, min_wind, min_len, top_n)
+    if key in st.session_state.history_snapshot_cache:
+        bundle = get_or_build_history_snapshot_bundle(
+            active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, top_n
+        )
+    else:
+        with st.spinner("Building 24-hour top-30 cache once..."):
+            bundle = get_or_build_history_snapshot_bundle(
+                active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, top_n
+            )
+
+    return bundle["snapshots"].get(hour_offset, []), bundle
+
 if layout_mode == "Wide":
     left, right = st.columns([2, 1])
 
     with left:
-        st.subheader("Global Crosswinds" if use_global else "US Crosswinds")
+        history_enabled, hour_offset = render_history_slider_controls(list_title, phone=is_phone)
+
+        results, history_bundle = apply_history_mode_results(history_enabled, hour_offset, live_results)
+        if history_enabled:
+            cached_count = len(history_bundle.get("candidate_icaos", [])) if history_bundle else 0
+            st.caption(f"Historical ranking: {history_offset_label(hour_offset, timezone_name)} • cached {cached_count} airports")
+
+        if st.session_state.selected_icao and not any(
+            r["icao"] == st.session_state.selected_icao for r in results[:top_n]
+        ):
+            if not st.session_state.selected_airport_result:
+                st.session_state.selected_icao = None
+
         with st.container(height=row_window_height, border=False):
             render_rows(
                 results[:top_n],
@@ -1748,11 +2149,24 @@ if layout_mode == "Wide":
 
 else:
     st.subheader("Map")
+
+    history_enabled, hour_offset = render_history_slider_controls(list_title, phone=is_phone)
+
+    results, history_bundle = apply_history_mode_results(history_enabled, hour_offset, live_results)
+    if history_enabled:
+        cached_count = len(history_bundle.get("candidate_icaos", [])) if history_bundle else 0
+        st.caption(f"Historical ranking: {history_offset_label(hour_offset, timezone_name)} • cached {cached_count} airports")
+
+    if st.session_state.selected_icao and not any(
+        r["icao"] == st.session_state.selected_icao for r in results[:top_n]
+    ):
+        if not st.session_state.selected_airport_result:
+            st.session_state.selected_icao = None
+
     render_map(results[:top_n], height=map_height)
 
     render_responsive_search()
 
-    st.subheader("Global Crosswinds" if use_global else "US Crosswinds")
     render_rows(
         results[:top_n],
         runway_ends_by_icao,
@@ -1761,46 +2175,3 @@ else:
         phone=is_phone,
         side_by_side_charts=side_by_side_charts,
     )
-
-
-# =========================
-# TIME SLIDER TEAL STYLING
-# =========================
-
-st.markdown("""
-<style>
-
-/* Teal history slider */
-div[data-testid="stSlider"] > div[data-baseweb="slider"] div[role="slider"] {
-    background-color:#11c5bf !important;
-    border-color:#11c5bf !important;
-}
-
-div[data-testid="stSlider"] > div[data-baseweb="slider"] > div > div {
-    background:#11c5bf !important;
-}
-
-/* Time machine bar */
-.time-machine-bar {
-    background: rgba(17,197,191,0.10);
-    border:1px solid rgba(17,197,191,0.35);
-    border-radius:14px;
-    padding:10px 14px;
-    margin-bottom:10px;
-}
-
-.time-machine-title {
-    color:#dff;
-    font-weight:800;
-    font-size:15px;
-    margin-bottom:4px;
-}
-
-.time-machine-sub {
-    color:#9dd;
-    font-size:11px;
-}
-
-</style>
-""", unsafe_allow_html=True)
-
