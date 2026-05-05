@@ -28,6 +28,13 @@ if "selected_icao" not in st.session_state:
 if "selected_airport_result" not in st.session_state:
     st.session_state.selected_airport_result = None
 
+if "history_mode" not in st.session_state:
+    st.session_state.history_mode = False
+
+if "history_slider_pos" not in st.session_state:
+    # Slider position is 0 = 23 hours ago, 23 = current/right side.
+    st.session_state.history_slider_pos = 23
+
 # Allow mobile HTML cards to select/expand an airport via query string.
 try:
     qp_selected = st.query_params.get("selected_icao", None)
@@ -739,6 +746,240 @@ def build_results(airports, runway_ends_by_icao, min_wind, min_len):
             out.append(best)
 
     return sorted(out, key=lambda x: x["cw"], reverse=True)
+
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_metar_histories_bulk(icaos_tuple, hours=24):
+    """Fetch 24-hour METAR history for many airports in batches.
+
+    Returns a dict: ICAO -> list of METAR dictionaries sorted newest first.
+    This powers the top-30 history slider without making one request per airport.
+    """
+    icaos = [str(x).upper().strip() for x in icaos_tuple if str(x).strip()]
+    histories = {icao: [] for icao in icaos}
+
+    # Historical requests are larger than current-METAR requests, so keep the
+    # batch smaller than BATCH_SIZE to avoid oversized URLs/responses.
+    history_batch_size = 90
+
+    for batch in chunks(icaos, history_batch_size):
+        url = f"https://aviationweather.gov/api/data/metar?ids={','.join(batch)}&format=json&hours={hours}"
+
+        try:
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            data = response.json()
+
+            for m in data:
+                icao = str(m.get("icaoId", "")).upper().strip()
+                if icao in histories:
+                    histories[icao].append(m)
+        except Exception:
+            # Keep the UI usable even if one batch fails.
+            continue
+
+    fallback_time = pd.Timestamp("1900-01-01", tz="UTC")
+    for icao, obs in histories.items():
+        def sort_time(m):
+            t = get_metar_observation_time(m)
+            return t if not pd.isna(t) else fallback_time
+
+        obs.sort(key=sort_time, reverse=True)
+
+    return histories
+
+
+def result_from_metar_snapshot(icao, m, runway_ends_by_icao, min_wind, min_len):
+    """Build one crosswind result row from a specific historical METAR."""
+    wind = parse_wind_from_metar(m, allow_vrb=False)
+    if wind is None:
+        return None
+
+    wind_dir, wind_spd, wind_gust, _ = wind
+
+    if wind_spd < min_wind:
+        return None
+
+    best = find_best_crosswind_runway(
+        icao,
+        runway_ends_by_icao,
+        wind_dir,
+        wind_spd,
+        wind_gust=wind_gust,
+        min_len=min_len,
+    )
+
+    if not best:
+        return None
+
+    obs_time = get_metar_observation_time(m)
+
+    best.update({
+        "wind": f"{int(wind_dir):03}/{int(wind_spd)}",
+        "gust": int(float(wind_gust)) if wind_gust is not None and not pd.isna(wind_gust) else None,
+        "wind_dir": round(wind_dir),
+        "wind_speed": round(wind_spd),
+        "raw_metar": m.get("rawOb", "—"),
+        "visibility": format_visibility(m),
+        "ceiling": format_ceiling(m),
+        "obs_time": obs_time,
+    })
+
+    return best
+
+
+def pick_observation_for_target(obs_list, target_time, max_staleness_minutes=95):
+    """Pick latest observation at/before a target hour without using very stale data."""
+    if not obs_list:
+        return None
+
+    target = pd.Timestamp(target_time)
+    if target.tzinfo is None:
+        target = target.tz_localize("UTC")
+    else:
+        target = target.tz_convert("UTC")
+
+    oldest_allowed = target - pd.Timedelta(minutes=max_staleness_minutes)
+    newest_allowed = target + pd.Timedelta(minutes=10)
+
+    for m in obs_list:
+        obs_time = get_metar_observation_time(m)
+        if pd.isna(obs_time):
+            continue
+
+        obs_time = pd.Timestamp(obs_time).tz_convert("UTC")
+        if oldest_allowed <= obs_time <= newest_allowed:
+            return m
+
+    return None
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def build_24h_ranked_snapshots(icaos_tuple, runway_ends_by_icao, min_wind, min_len, top_n=30):
+    """Return 24 ranked top-N snapshots, one for each hour from current back to 23h ago.
+
+    Output shape is roughly 24 x top_n. The slider only switches between these
+    prebuilt snapshots, so row/map updates stay snappy after the initial fetch.
+    """
+    icaos = tuple(sorted(str(x).upper().strip() for x in icaos_tuple if str(x).strip()))
+    histories = get_metar_histories_bulk(icaos, hours=25)
+    now_utc = pd.Timestamp.now(tz="UTC")
+    snapshots = {}
+
+    for hour_offset in range(24):
+        target_time = now_utc - pd.Timedelta(hours=hour_offset)
+        rows = []
+
+        for icao in icaos:
+            m = pick_observation_for_target(histories.get(icao, []), target_time)
+            if not m:
+                continue
+
+            result = result_from_metar_snapshot(icao, m, runway_ends_by_icao, min_wind, min_len)
+            if result:
+                result["history_hour_offset"] = hour_offset
+                rows.append(result)
+
+        rows = sorted(rows, key=lambda x: x["cw"], reverse=True)[:top_n]
+        snapshots[hour_offset] = rows
+
+    return snapshots
+
+
+def history_offset_label(hour_offset, timezone_name="America/Los_Angeles"):
+    if hour_offset <= 0:
+        return "Current"
+
+    ts = pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=hour_offset)
+    try:
+        local = ts.tz_convert(ZoneInfo(timezone_name))
+    except Exception:
+        local = ts.tz_convert(ZoneInfo("America/Los_Angeles"))
+
+    return f"{hour_offset}h ago • {local.strftime('%H:%M %Z')}"
+
+
+def render_history_slider_controls(title_text, phone=False):
+    """Compact top-of-list time-machine switch + slider."""
+    st.markdown(
+        """
+        <style>
+            .xwind-list-title {
+                font-size: 1.28rem;
+                line-height: 1.15;
+                font-weight: 800;
+                margin: 0.1rem 0 0.05rem 0;
+            }
+            .history-slider-caption {
+                color:#aaa;
+                font-size:10px;
+                margin-top:-12px;
+                display:flex;
+                justify-content:space-between;
+            }
+            div[data-testid="stToggle"] label {
+                font-size: 0.78rem !important;
+                font-weight: 800 !important;
+                white-space: nowrap !important;
+            }
+            div[data-testid="stSlider"] label {
+                font-size: 0.76rem !important;
+                color:#d8d8d8 !important;
+                font-weight:800 !important;
+            }
+            div[data-testid="stSlider"] { padding-top: 0rem !important; padding-bottom: 0rem !important; }
+            @media (max-width: 760px) {
+                .xwind-list-title { font-size: 1rem; }
+                .history-slider-caption { font-size:9px; margin-top:-10px; }
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if phone:
+        st.markdown(f"<div class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
+        history_enabled = st.toggle("24h history", value=st.session_state.history_mode, key="history_mode_toggle_phone")
+        slider_pos = st.session_state.history_slider_pos
+        if history_enabled:
+            slider_pos = st.slider(
+                "Timeline",
+                min_value=0,
+                max_value=23,
+                value=st.session_state.history_slider_pos,
+                step=1,
+                key="history_slider_phone",
+                label_visibility="collapsed",
+            )
+            st.markdown("<div class='history-slider-caption'><span>23h ago</span><span>Current</span></div>", unsafe_allow_html=True)
+    else:
+        c_title, c_toggle, c_slider = st.columns([1.05, 0.42, 1.55], gap="small")
+        with c_title:
+            st.markdown(f"<div class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
+        with c_toggle:
+            history_enabled = st.toggle("24h", value=st.session_state.history_mode, key="history_mode_toggle")
+        slider_pos = st.session_state.history_slider_pos
+        with c_slider:
+            if history_enabled:
+                slider_pos = st.slider(
+                    "Timeline",
+                    min_value=0,
+                    max_value=23,
+                    value=st.session_state.history_slider_pos,
+                    step=1,
+                    key="history_slider",
+                    label_visibility="collapsed",
+                )
+                st.markdown("<div class='history-slider-caption'><span>23h ago</span><span>Current</span></div>", unsafe_allow_html=True)
+            else:
+                st.markdown("<div style='height:38px;'></div>", unsafe_allow_html=True)
+
+    st.session_state.history_mode = history_enabled
+    st.session_state.history_slider_pos = slider_pos
+    hour_offset = 23 - int(slider_pos)
+
+    return history_enabled, hour_offset
 
 
 def build_history_table(icao, runway_ends_by_icao, min_len, hours=24, timezone_name="America/Los_Angeles"):
@@ -1686,6 +1927,8 @@ else:
 if refresh:
     get_metars.clear()
     get_metar_history.clear()
+    get_metar_histories_bulk.clear()
+    build_24h_ranked_snapshots.clear()
     st.rerun()
 
 if use_global:
@@ -1693,14 +1936,11 @@ if use_global:
 else:
     active_airports = airports[airports["iso_country"] == "US"].copy()
 
+# Live results are still loaded first so normal mode stays quick.
 with st.spinner("Loading airport winds..."):
-    results = build_results(active_airports, runway_ends_by_icao, min_wind, min_len)
+    live_results = build_results(active_airports, runway_ends_by_icao, min_wind, min_len)
 
-if st.session_state.selected_icao and not any(
-    r["icao"] == st.session_state.selected_icao for r in results[:top_n]
-):
-    if not st.session_state.selected_airport_result:
-        st.session_state.selected_icao = None
+results = live_results
 
 
 def render_responsive_search():
@@ -1726,11 +1966,35 @@ def render_responsive_search():
             side_by_side_charts=side_by_side_charts,
         )
 
+list_title = "Global Crosswinds" if use_global else "US Crosswinds"
+active_icaos = tuple(sorted(active_airports["ident"].dropna().astype(str).unique()))
+
 if layout_mode == "Wide":
     left, right = st.columns([2, 1])
 
     with left:
-        st.subheader("Global Crosswinds" if use_global else "US Crosswinds")
+        history_enabled, hour_offset = render_history_slider_controls(list_title, phone=is_phone)
+
+        if history_enabled:
+            with st.spinner("Building 24-hour top-30 snapshots..."):
+                snapshots = build_24h_ranked_snapshots(
+                    active_icaos,
+                    runway_ends_by_icao,
+                    min_wind,
+                    min_len,
+                    top_n=top_n,
+                )
+            results = snapshots.get(hour_offset, [])
+            st.caption(f"Historical ranking: {history_offset_label(hour_offset, timezone_name)}")
+        else:
+            results = live_results
+
+        if st.session_state.selected_icao and not any(
+            r["icao"] == st.session_state.selected_icao for r in results[:top_n]
+        ):
+            if not st.session_state.selected_airport_result:
+                st.session_state.selected_icao = None
+
         with st.container(height=row_window_height, border=False):
             render_rows(
                 results[:top_n],
@@ -1748,11 +2012,33 @@ if layout_mode == "Wide":
 
 else:
     st.subheader("Map")
+
+    history_enabled, hour_offset = render_history_slider_controls(list_title, phone=is_phone)
+
+    if history_enabled:
+        with st.spinner("Building 24-hour top-30 snapshots..."):
+            snapshots = build_24h_ranked_snapshots(
+                active_icaos,
+                runway_ends_by_icao,
+                min_wind,
+                min_len,
+                top_n=top_n,
+            )
+        results = snapshots.get(hour_offset, [])
+        st.caption(f"Historical ranking: {history_offset_label(hour_offset, timezone_name)}")
+    else:
+        results = live_results
+
+    if st.session_state.selected_icao and not any(
+        r["icao"] == st.session_state.selected_icao for r in results[:top_n]
+    ):
+        if not st.session_state.selected_airport_result:
+            st.session_state.selected_icao = None
+
     render_map(results[:top_n], height=map_height)
 
     render_responsive_search()
 
-    st.subheader("Global Crosswinds" if use_global else "US Crosswinds")
     render_rows(
         results[:top_n],
         runway_ends_by_icao,
