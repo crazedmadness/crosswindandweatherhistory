@@ -1483,6 +1483,37 @@ def render_rows(rows, runway_ends_by_icao, min_len, compact=False, phone=False, 
                     side_by_side_charts=side_by_side_charts,
                 )
 
+def enrich_snapshot_rows_with_airport_metadata(rows, airport_lookup):
+    """Make historical slider rows map-safe by backfilling airport metadata.
+
+    The cached time-slider snapshots should already include these fields, but
+    this keeps older cache/session rows from breaking the map after a code update.
+    """
+    enriched = []
+    for row in rows or []:
+        r = dict(row)
+        icao = str(r.get("icao", "")).upper().strip()
+        airport = airport_lookup.get(icao, {}) if airport_lookup else {}
+
+        fallback_fields = {
+            "name": "name",
+            "city": "municipality",
+            "country": "iso_country",
+            "region": "iso_region",
+            "elevation": "elevation_ft",
+            "lat": "latitude_deg",
+            "lon": "longitude_deg",
+        }
+
+        for out_key, airport_key in fallback_fields.items():
+            if out_key not in r or r.get(out_key) in (None, "", "—") or pd.isna(r.get(out_key)):
+                r[out_key] = airport.get(airport_key)
+
+        enriched.append(r)
+
+    return enriched
+
+
 def make_runway_line(row, distance_nm=8):
     if row.get("heading") in (None, "—") or pd.isna(row.get("lat")) or pd.isna(row.get("lon")):
         return None
@@ -1543,14 +1574,28 @@ def make_wind_arrow(row, start_nm=18, end_nm=7):
 
 
 def render_map(rows, height=650):
-    df = pd.DataFrame(rows).dropna(subset=["lat", "lon"]).copy()
+    """Render the map safely, including during time-slider snapshots.
+
+    Some historical/cache snapshots may briefly be empty or may contain rows
+    without coordinate columns. This guard prevents Pandas dropna() from
+    raising KeyError and keeps the app usable while the list updates.
+    """
+    df = pd.DataFrame(rows)
 
     selected_extra = st.session_state.selected_airport_result
-    if selected_extra and selected_extra["icao"] not in df.get("icao", pd.Series(dtype=str)).values:
-        df = pd.concat([df, pd.DataFrame([selected_extra])], ignore_index=True)
+    if selected_extra:
+        if df.empty or "icao" not in df.columns or selected_extra.get("icao") not in df.get("icao", pd.Series(dtype=str)).values:
+            df = pd.concat([df, pd.DataFrame([selected_extra])], ignore_index=True)
+
+    required_coord_cols = {"lat", "lon"}
+    if df.empty or not required_coord_cols.issubset(df.columns):
+        st.info("No map coordinates available for this snapshot.")
+        return
+
+    df = df.dropna(subset=["lat", "lon"]).copy()
 
     if df.empty:
-        st.info("No map coordinates available.")
+        st.info("No map coordinates available for this snapshot.")
         return
 
     df["color"] = df["cw"].apply(lambda x: get_color(x)[1])
@@ -1824,6 +1869,22 @@ if "use_global" not in st.session_state:
     st.session_state.use_global = False
 
 
+# Bump this when the cached time-slider row shape changes.
+HISTORY_SNAPSHOT_CACHE_VERSION = "2026-05-05-map-safe-v2"
+
+if st.session_state.get("history_snapshot_cache_version") != HISTORY_SNAPSHOT_CACHE_VERSION:
+    for _key in [
+        "history_snapshot_cache",
+        "time_slider_cache",
+        "snapshot_cache",
+        "history_snapshots",
+        "historical_snapshots",
+    ]:
+        st.session_state.pop(_key, None)
+    st.session_state.history_snapshot_cache_version = HISTORY_SNAPSHOT_CACHE_VERSION
+
+
+
 def render_top_header_controls(phone=False, tablet=False):
     st.markdown(
         """
@@ -2021,6 +2082,8 @@ with st.spinner("Loading airport winds..."):
 
 results = live_results
 
+
+results = enrich_snapshot_rows_with_airport_metadata(results, airport_lookup)
 
 def render_responsive_search():
     if is_phone:
