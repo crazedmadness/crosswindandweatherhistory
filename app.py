@@ -2615,14 +2615,23 @@ def apply_history_mode_results(history_enabled, hour_offset, live_results):
         hour_offset = 0
     hour_offset = max(0, min(23, hour_offset))
 
+    live_preview_bundle = {
+        "snapshots": {0: live_results[:HISTORY_TOP_N]},
+        "candidate_icaos": [r.get("icao") for r in live_results[:HISTORY_TOP_N] if r.get("icao")],
+        "candidate_pool_size": len(live_results[:HISTORY_TOP_N]),
+        "built_at_utc": pd.Timestamp.now(tz="UTC"),
+        "live_now_preview": True,
+    }
+
     if not history_enabled:
-        return live_results, {
-            "snapshots": {0: live_results},
-            "candidate_icaos": [r.get("icao") for r in live_results if r.get("icao")],
-            "candidate_pool_size": len(live_results),
-            "built_at_utc": pd.Timestamp.now(tz="UTC"),
-            "inactive_preview": True,
-        }
+        return live_results, live_preview_bundle
+
+    # Critical behavior: history slider at NOW must exactly match normal live
+    # mode, only limited to the history display size. Do not use the 24h
+    # historical METAR endpoint for hour 0, because its newest bucket can lag
+    # or differ from the current METAR endpoint.
+    if hour_offset == 0:
+        return live_results[:HISTORY_TOP_N], live_preview_bundle
 
     key = history_cache_key(active_icaos, use_global, min_wind, min_len, HISTORY_TOP_N)
 
