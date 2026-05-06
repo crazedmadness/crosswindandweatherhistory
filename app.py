@@ -764,32 +764,60 @@ def build_results(airports, runway_ends_by_icao, min_wind, min_len):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def get_metar_histories_bulk(icaos_tuple, hours=24):
-    """Fetch 24-hour METAR history for many airports in small reliable batches.
+    """Fetch METAR history robustly for many airports.
 
-    Returns a dict: ICAO -> list of METAR dictionaries sorted newest first.
-    This function is cached, so the initial history build is the only expensive step.
+    Important: do not use huge historical batches. The AviationWeather endpoint
+    can silently return partial/truncated-looking results when one request asks
+    for too many stations x too many hours. Smaller batches are slower up front
+    but much more reliable, and the result is cached.
     """
     icaos = [str(x).upper().strip() for x in icaos_tuple if str(x).strip()]
     histories = {icao: [] for icao in icaos}
 
-    # Historical responses are bigger than current METAR responses.
-    # Small batches are much more reliable on Streamlit Cloud.
-    history_batch_size = 75
+    def fetch_batch(batch, timeout=45):
+        url = "https://aviationweather.gov/api/data/metar"
+        params = {
+            "ids": ",".join(batch),
+            "format": "json",
+            "hours": int(hours),
+        }
+        response = requests.get(url, params=params, timeout=timeout)
+        response.raise_for_status()
+        data = response.json()
+        return data if isinstance(data, list) else []
+
+    # Keep this intentionally small. 15 stations * ~26 hourly reports is a
+    # manageable response and avoids the older-hour blanks caused by oversized
+    # history queries.
+    history_batch_size = 15
+    failed_batches = []
 
     for batch in chunks(icaos, history_batch_size):
-        url = f"https://aviationweather.gov/api/data/metar?ids={','.join(batch)}&format=json&hours={hours}"
-
+        batch = list(batch)
         try:
-            response = requests.get(url, timeout=45)
-            response.raise_for_status()
-            data = response.json()
+            data = fetch_batch(batch)
+        except Exception:
+            failed_batches.append(batch)
+            continue
 
+        for m in data:
+            icao = str(m.get("icaoId", "")).upper().strip()
+            if icao in histories:
+                histories[icao].append(m)
+
+    # Retry failed batches in very small chunks so one bad/noisy station does
+    # not wipe out history for the whole group.
+    for failed in failed_batches:
+        for small_batch in chunks(failed, 3):
+            small_batch = list(small_batch)
+            try:
+                data = fetch_batch(small_batch, timeout=30)
+            except Exception:
+                continue
             for m in data:
                 icao = str(m.get("icaoId", "")).upper().strip()
                 if icao in histories:
                     histories[icao].append(m)
-        except Exception:
-            continue
 
     fallback_time = pd.Timestamp("1900-01-01", tz="UTC")
     for icao, obs in histories.items():
@@ -797,7 +825,21 @@ def get_metar_histories_bulk(icaos_tuple, hours=24):
             t = get_metar_observation_time(m)
             return t if not pd.isna(t) else fallback_time
 
-        obs.sort(key=sort_time, reverse=True)
+        # Deduplicate by raw METAR/time. Repeated records can otherwise bias
+        # the same airport across multiple render cycles.
+        seen = set()
+        deduped = []
+        for m in obs:
+            t = get_metar_observation_time(m)
+            raw = str(m.get("rawOb", ""))
+            key = (str(t), raw)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(m)
+
+        deduped.sort(key=sort_time, reverse=True)
+        histories[icao] = deduped
 
     return histories
 
@@ -900,20 +942,22 @@ def build_24h_ranked_snapshots(icaos_tuple, runway_ends_by_icao, min_wind, min_l
 
 
 def build_24h_hourly_top15_bundle(icaos_tuple, runway_ends_by_icao, min_len, top_n=15, live_results=None):
-    """Build the simple 24-list history model used by the hour selector.
+    """Build the simple 24-list history model used by the slider.
 
     snapshots[0] is the live/current Top N, matching unchecked mode.
     snapshots[1]..snapshots[23] are independent Top N rankings for each
-    previous hour.
+    previous UTC hour bucket.
 
-    Important: historical METARs are not always issued exactly on the hour
-    (many arrive at :53, :55, etc.). Instead of exact-hour buckets, each METAR
-    is assigned to the *nearest* hourly target within a non-overlapping 45
-    minute tolerance. That keeps old hours populated without allowing one
-    observation to be reused across several slider positions.
+    Bucket rule:
+      - A METAR at 2153Z belongs to the 21Z bucket.
+      - The 21Z bucket uses the latest valid METAR from 21:00:00-21:59:59Z.
+      - No METAR is reused across multiple slider hours.
+
+    This is simpler and more reliable than nearest-target matching, and it
+    prevents an airport from being carried across several hours by one report.
     """
     icaos = tuple(sorted(str(x).upper().strip() for x in icaos_tuple if str(x).strip()))
-    histories = get_metar_histories_bulk(icaos, hours=26)
+    histories = get_metar_histories_bulk(icaos, hours=30)
     base_hour_utc = pd.Timestamp.now(tz="UTC").floor("h")
 
     snapshots = {h: [] for h in range(24)}
@@ -923,10 +967,9 @@ def build_24h_hourly_top15_bundle(icaos_tuple, runway_ends_by_icao, min_len, top
         snapshots[0] = [dict(row) for row in live_results[:top_n]]
 
     raw_hour_rows = {h: [] for h in range(1, 24)}
-    max_nearest_minutes = 45
 
     for icao in icaos:
-        best_obs_by_hour = {}
+        latest_obs_by_bucket = {}
 
         for m in histories.get(icao, []):
             obs_time = get_metar_observation_time(m)
@@ -934,27 +977,22 @@ def build_24h_hourly_top15_bundle(icaos_tuple, runway_ends_by_icao, min_len, top
                 continue
 
             obs_time = pd.Timestamp(obs_time).tz_convert("UTC")
-            delta_hours = (base_hour_utc - obs_time) / pd.Timedelta(hours=1)
+            obs_hour = obs_time.floor("h")
+            hour_offset_float = (base_hour_utc - obs_hour) / pd.Timedelta(hours=1)
 
-            # Assign this METAR to the nearest slider hour. Examples:
-            #   target hour 12Z can use 11:53Z or 12:04Z
-            #   but one METAR cannot fill multiple hours.
-            nearest_hour_offset = int(round(float(delta_hours)))
-            if nearest_hour_offset < 1 or nearest_hour_offset > 23:
+            try:
+                hour_offset = int(hour_offset_float)
+            except Exception:
                 continue
 
-            target_time = base_hour_utc - pd.Timedelta(hours=nearest_hour_offset)
-            minutes_from_target = abs((obs_time - target_time) / pd.Timedelta(minutes=1))
-            if minutes_from_target > max_nearest_minutes:
+            if hour_offset < 1 or hour_offset > 23:
                 continue
 
-            previous = best_obs_by_hour.get(nearest_hour_offset)
-            if previous is None or minutes_from_target < previous[0] or (
-                minutes_from_target == previous[0] and obs_time > previous[1]
-            ):
-                best_obs_by_hour[nearest_hour_offset] = (minutes_from_target, obs_time, m)
+            previous = latest_obs_by_bucket.get(hour_offset)
+            if previous is None or obs_time > previous[0]:
+                latest_obs_by_bucket[hour_offset] = (obs_time, m)
 
-        for hour_offset, (_, obs_time, m) in best_obs_by_hour.items():
+        for hour_offset, (obs_time, m) in latest_obs_by_bucket.items():
             result = result_from_metar_snapshot(
                 icao,
                 m,
@@ -963,11 +1001,11 @@ def build_24h_hourly_top15_bundle(icaos_tuple, runway_ends_by_icao, min_len, top
                 min_len,
             )
             if result:
-                target_time = base_hour_utc - pd.Timedelta(hours=hour_offset)
+                bucket_time = base_hour_utc - pd.Timedelta(hours=hour_offset)
                 result["history_hour_offset"] = hour_offset
-                result["snapshot_target_utc"] = target_time
-                result["obs_nearest_target_utc"] = target_time
-                result["obs_minutes_from_target"] = round(abs((obs_time - target_time) / pd.Timedelta(minutes=1)), 1)
+                result["snapshot_target_utc"] = bucket_time
+                result["obs_hour_utc"] = obs_time.floor("h")
+                result["obs_minutes_into_hour"] = int(obs_time.minute)
                 raw_hour_rows[hour_offset].append(result)
 
     for hour_offset in range(1, 24):
@@ -976,6 +1014,8 @@ def build_24h_hourly_top15_bundle(icaos_tuple, runway_ends_by_icao, min_len, top
             key=lambda x: x.get("cw", -1),
             reverse=True,
         )[:top_n]
+
+    hour_counts = {h: len(snapshots.get(h, [])) for h in range(24)}
 
     return {
         "snapshots": snapshots,
@@ -990,8 +1030,10 @@ def build_24h_hourly_top15_bundle(icaos_tuple, runway_ends_by_icao, min_len, top
         "base_hour_utc": base_hour_utc,
         "built_at_utc": pd.Timestamp.now(tz="UTC"),
         "simple_hourly_top15": True,
-        "nearest_hour_bucket_minutes": max_nearest_minutes,
+        "hour_counts": hour_counts,
+        "bucket_rule": "obs_time.floor('h')",
     }
+
 
 def history_snapshot_times(hour_offset, timezone_name="America/Los_Angeles"):
     """Return the selected snapshot bucket in UTC and local viewer time."""
