@@ -2419,13 +2419,11 @@ else:
 st.session_state.min_len = min_len
 st.session_state.top_n = top_n
 st.session_state.layout_mode = layout_mode
-st.session_state.use_global = use_global
-
 # Put the history/global controls directly under the banner/options row.
 # The global checkbox here owns the active airport set.
 _history_title_for_topbar = "Global Crosswinds" if st.session_state.use_global else "US Crosswinds"
 history_enabled, hour_offset, use_global = render_history_slider_controls(_history_title_for_topbar, phone=is_phone)
-st.session_state.use_global = use_global
+# Do not assign st.session_state.use_global here. The checkbox with key="use_global" owns that value.
 
 # Responsive behavior based on viewport width.
 # Phone and narrow tablet load stacked. iPad landscape / desktop load wide.
