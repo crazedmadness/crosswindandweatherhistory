@@ -1065,48 +1065,65 @@ def render_history_time_badge(hour_offset, timezone_name="America/Los_Angeles"):
 
 
 def ensure_xwind_timeline_component():
-    # Create a tiny local Streamlit component for the custom timeline.
-    component_dir = Path(__file__).parent / "_xwind_timeline_component_return_v3"
+    """Create a small React-based Streamlit component for the history timeline.
+
+    Important behavior change:
+      - The pretty timeline is now a local/staged picker.
+      - Drag/click/wheel only changes the draft hour inside the component.
+      - Python/list/map update only when the user presses LOAD.
+
+    This avoids the stale replay problem that happens when every drag/click
+    immediately emits a Streamlit component value and triggers a full app rerun.
+    """
+    component_dir = Path(__file__).parent / "_xwind_react_timeline_component"
     component_dir.mkdir(exist_ok=True)
     index_file = component_dir / "index.html"
 
-    component_html = '''<!doctype html>
+    component_html = r'''<!doctype html>
 <html>
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <style>
         :root { --teal:#12d6cb; --teal-mid:rgba(18,214,203,.42); --text:#e9fffd; --muted:#92a8a7; }
         * { box-sizing:border-box; }
         body { margin:0; background:transparent; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif; overflow:hidden; color:var(--text); }
-        .shell { position:relative; height:118px; border:1px solid var(--teal-mid); border-radius:16px; background:radial-gradient(circle at 50% 0%, rgba(18,214,203,.20), transparent 42%), linear-gradient(135deg, rgba(18,214,203,.11), rgba(255,255,255,.025)); box-shadow:0 0 0 1px rgba(255,255,255,.035) inset, 0 8px 24px rgba(0,0,0,.22); overflow:hidden; user-select:none; touch-action:pan-y; }
-        .shell.phone { height:104px; border-radius:14px; }
+        .shell { position:relative; height:126px; border:1px solid var(--teal-mid); border-radius:16px; background:radial-gradient(circle at 50% 0%, rgba(18,214,203,.20), transparent 42%), linear-gradient(135deg, rgba(18,214,203,.11), rgba(255,255,255,.025)); box-shadow:0 0 0 1px rgba(255,255,255,.035) inset, 0 8px 24px rgba(0,0,0,.22); overflow:hidden; user-select:none; touch-action:pan-y; }
+        .shell.phone { height:112px; border-radius:14px; }
         .shell.off { filter: grayscale(1); opacity:.62; border-color:rgba(255,255,255,.16); background:linear-gradient(135deg, rgba(255,255,255,.055), rgba(255,255,255,.018)); box-shadow:0 0 0 1px rgba(255,255,255,.025) inset, 0 8px 20px rgba(0,0,0,.16); }
         .shell.off .viewport { cursor:not-allowed; }
         .shell.off .chip { opacity:.35; }
         .shell.off .marker:before, .shell.off .marker:after { background:rgba(255,255,255,.35); box-shadow:none; }
-        .inside-toggle { position:absolute; left:10px; top:7px; z-index:10; height:20px; display:flex; align-items:center; gap:5px; border:1px solid rgba(18,214,203,.48); background:rgba(18,214,203,.14); color:#dffffd; border-radius:999px; padding:2px 7px 2px 4px; font-size:9px; font-weight:950; letter-spacing:.25px; cursor:default; pointer-events:none; box-shadow:0 0 14px rgba(18,214,203,.18); }
+        .inside-toggle { position:absolute; left:10px; top:7px; z-index:10; height:20px; display:flex; align-items:center; gap:5px; border:1px solid rgba(18,214,203,.48); background:rgba(18,214,203,.14); color:#dffffd; border-radius:999px; padding:2px 7px 2px 4px; font-size:9px; font-weight:950; letter-spacing:.25px; pointer-events:none; box-shadow:0 0 14px rgba(18,214,203,.18); }
         .inside-toggle .knob { width:14px; height:14px; border-radius:50%; background:var(--teal); box-shadow:0 0 14px rgba(18,214,203,.72); }
         .inside-toggle.off { background:rgba(255,255,255,.055); border-color:rgba(255,255,255,.16); color:#b9c9c8; box-shadow:none; }
         .inside-toggle.off .knob { background:rgba(255,255,255,.28); box-shadow:none; }
-        .top { height:31px; display:flex; align-items:center; justify-content:center; gap:8px; font-size:11px; color:#dffffd; padding-top:3px; padding-left:58px; padding-right:58px; }
+        .top { height:31px; display:flex; align-items:center; justify-content:center; gap:8px; font-size:11px; color:#dffffd; padding-top:3px; padding-left:58px; padding-right:72px; }
         .pill { background:var(--teal); color:#041615; border-radius:999px; font-weight:950; letter-spacing:.35px; padding:2px 8px; min-width:48px; text-align:center; box-shadow:0 0 18px rgba(18,214,203,.38); }
         .timebits { display:flex; gap:10px; white-space:nowrap; font-weight:750; }
         .timebits b { color:#8df7f1; }
-        .viewport { position:absolute; left:0; right:0; top:31px; bottom:18px; overflow:hidden; cursor:grab; }
+        .viewport { position:absolute; left:0; right:0; top:31px; bottom:28px; overflow:hidden; cursor:grab; }
         .viewport.dragging { cursor:grabbing; }
-        .rail { position:absolute; top:18px; height:42px; display:flex; align-items:center; will-change:transform; transition:transform 520ms cubic-bezier(.17, .89, .28, 1.22); }
+        .rail { position:absolute; top:18px; height:42px; display:flex; align-items:center; will-change:transform; transition:transform 500ms cubic-bezier(.17, .89, .28, 1.22); }
         .viewport.dragging .rail { transition:none; }
-        .chip { flex:0 0 auto; width:68px; height:42px; margin:0 4px; border-radius:12px; border:1px solid rgba(255,255,255,.12); background:rgba(255,255,255,.045); display:flex; flex-direction:column; align-items:center; justify-content:center; color:#cfd8d8; transform:scale(.88); opacity:.58; transition:transform 420ms cubic-bezier(.17,.89,.28,1.22), opacity 220ms ease, background 220ms ease, border-color 220ms ease, box-shadow 220ms ease; }
+        .chip { flex:0 0 auto; width:68px; height:42px; margin:0 4px; border-radius:12px; border:1px solid rgba(255,255,255,.12); background:rgba(255,255,255,.045); display:flex; flex-direction:column; align-items:center; justify-content:center; color:#cfd8d8; transform:scale(.88); opacity:.58; transition:transform 380ms cubic-bezier(.17,.89,.28,1.22), opacity 200ms ease, background 200ms ease, border-color 200ms ease, box-shadow 200ms ease; }
         .chip.active { transform:scale(1.16); opacity:1; color:#ffffff; background:rgba(18,214,203,.18); border-color:var(--teal); box-shadow:0 0 0 1px rgba(18,214,203,.20) inset, 0 0 22px rgba(18,214,203,.28); }
+        .chip.loaded { border-color:rgba(255,255,255,.34); box-shadow:0 0 0 1px rgba(255,255,255,.10) inset; }
         .chip .age { font-size:13px; font-weight:950; line-height:14px; letter-spacing:.3px; }
         .chip .utc { font-size:9px; color:#86f3ee; line-height:11px; font-weight:850; }
-        .marker { position:absolute; left:50%; top:31px; bottom:14px; width:0; pointer-events:none; z-index:5; }
+        .marker { position:absolute; left:50%; top:31px; bottom:24px; width:0; pointer-events:none; z-index:5; }
         .marker:before { content:""; position:absolute; top:0; bottom:0; left:-1px; width:2px; background:var(--teal); box-shadow:0 0 18px rgba(18,214,203,.9); border-radius:99px; }
         .marker:after { content:""; position:absolute; top:-3px; left:-8px; width:16px; height:16px; background:var(--teal); transform:rotate(45deg); border-radius:4px; box-shadow:0 0 20px rgba(18,214,203,.75); }
-        .glow { position:absolute; left:50%; top:31px; bottom:18px; width:100px; transform:translateX(-50%); background:linear-gradient(90deg, transparent, rgba(18,214,203,.12), transparent); pointer-events:none; z-index:2; }
-        .bottom { position:absolute; left:12px; right:12px; bottom:4px; display:flex; justify-content:space-between; color:var(--muted); font-size:9.5px; font-weight:850; }
+        .glow { position:absolute; left:50%; top:31px; bottom:28px; width:100px; transform:translateX(-50%); background:linear-gradient(90deg, transparent, rgba(18,214,203,.12), transparent); pointer-events:none; z-index:2; }
+        .bottom { position:absolute; left:12px; right:90px; bottom:5px; display:flex; justify-content:space-between; color:var(--muted); font-size:9.5px; font-weight:850; }
         .hint { position:absolute; right:12px; top:8px; color:#6deee8; font-size:9px; font-weight:850; opacity:.65; }
+        .load { position:absolute; right:10px; bottom:5px; z-index:15; border:1px solid rgba(18,214,203,.55); background:rgba(18,214,203,.20); color:#eaffff; height:23px; border-radius:999px; font-size:9px; font-weight:950; letter-spacing:.45px; padding:2px 9px; cursor:pointer; box-shadow:0 0 15px rgba(18,214,203,.20); }
+        .load:hover { background:rgba(18,214,203,.30); }
+        .load:disabled { cursor:not-allowed; opacity:.40; background:rgba(255,255,255,.08); border-color:rgba(255,255,255,.16); box-shadow:none; }
+        .dirty-dot { position:absolute; right:82px; bottom:12px; width:6px; height:6px; border-radius:99px; background:#12d6cb; box-shadow:0 0 14px rgba(18,214,203,.95); opacity:0; transition:opacity 150ms ease; }
+        .dirty-dot.on { opacity:1; }
         .shell.phone .inside-toggle { left:7px; top:7px; font-size:8px; padding-right:6px; }
         .shell.phone .inside-toggle .knob { width:13px; height:13px; }
         .shell.phone .top { font-size:9.2px; gap:5px; padding-left:52px; padding-right:5px; justify-content:flex-start; }
@@ -1115,190 +1132,241 @@ def ensure_xwind_timeline_component():
         .shell.phone .chip .age { font-size:11.5px; }
         .shell.phone .chip .utc { font-size:8px; }
         .shell.phone .hint { display:none; }
+        .shell.phone .bottom { right:78px; font-size:8.5px; }
+        .shell.phone .load { right:7px; bottom:5px; height:22px; font-size:8px; padding:2px 7px; }
+        .shell.phone .dirty-dot { right:68px; }
     </style>
 </head>
 <body>
-    <div class="shell" id="shell">
-        <button class="inside-toggle" id="insideToggle" title="24 hour history status"><span class="knob"></span><span>24h</span></button>
-        <div class="top"><span class="pill" id="agePill">NOW</span><span class="timebits"><span><b>UTC</b> <span id="utcLabel"></span></span><span><b>LOCAL</b> <span id="localLabel"></span></span></span></div>
-        <div class="hint">drag / wheel</div>
-        <div class="viewport" id="viewport"><div class="rail" id="rail"></div></div>
-        <div class="glow"></div><div class="marker"></div>
-        <div class="bottom"><span>23h ago</span><span>fixed marker</span><span>current</span></div>
-    </div>
+    <div id="root"></div>
 <script>
-let labels=[], selectedOffset=0, historyActive=false, phone=false, chipW=76;
-let lastRenderOffset=null, commitSeq=0, commitTimer=null, dragIdxFloat=null;
-let componentInstanceId = "xwind_" + Math.random().toString(36).slice(2) + "_" + Date.now().toString(36);
-let renderNonce = "initial";
-let pendingCommitUntil = 0;
-const rail=document.getElementById("rail"), viewport=document.getElementById("viewport"), agePill=document.getElementById("agePill"), utcLabel=document.getElementById("utcLabel"), localLabel=document.getElementById("localLabel"), insideToggle=document.getElementById("insideToggle"), shell=document.getElementById("shell");
-function send(type,data){ window.parent.postMessage(Object.assign({isStreamlitMessage:true,type:type},data),"*"); }
-function setFrameHeight(height){ send("streamlit:setFrameHeight",{height:height}); }
-function componentReady(){ send("streamlit:componentReady",{apiVersion:1}); }
-function selectedIndexFromOffset(offset){ return labels.findIndex(x=>Number(x.offset)===Number(offset)); }
-function offsetFromIndex(index){ index=Math.max(0,Math.min(labels.length-1,index)); return Number(labels[index].offset); }
-function clampHour(value){ return Math.max(0,Math.min(23,Number(value))); }
-function rebuildChips(){
-    rail.innerHTML="";
-    labels.forEach(item=>{
-        const div=document.createElement("div");
-        div.className="chip";
-        div.dataset.offset=item.offset;
-        div.innerHTML=`<div class="age">${item.age}</div><div class="utc">${item.utc}</div>`;
-        div.addEventListener("click",()=>selectOffset(item.offset,true,"click"));
-        rail.appendChild(div);
+(function(){
+    const e = React.createElement;
+    let root = null;
+    let streamlitArgs = {labels: [], selected_offset: 0, active: false, phone: false, height: 126, render_nonce: "initial"};
+    let componentInstanceId = "xwind_react_" + Math.random().toString(36).slice(2) + "_" + Date.now().toString(36);
+    let eventSeq = 0;
+
+    function send(type, data){
+        window.parent.postMessage(Object.assign({isStreamlitMessage:true, type:type}, data), "*");
+    }
+    function setFrameHeight(height){ send("streamlit:setFrameHeight", {height: height}); }
+    function componentReady(){ send("streamlit:componentReady", {apiVersion:1}); }
+    function setComponentValue(payload){ send("streamlit:setComponentValue", {value: payload}); }
+    function clampHour(value){ return Math.max(0, Math.min(23, Number(value) || 0)); }
+    function offsetFromIndex(labels, index){
+        if(!labels.length) return 0;
+        const safe = Math.max(0, Math.min(labels.length - 1, index));
+        return Number(labels[safe].offset);
+    }
+    function indexFromOffset(labels, offset){
+        const idx = labels.findIndex(x => Number(x.offset) === Number(offset));
+        return idx < 0 ? Math.max(labels.length - 1, 0) : idx;
+    }
+
+    function TimelineApp(){
+        const [args, setArgs] = React.useState(streamlitArgs);
+        const [draftHour, setDraftHour] = React.useState(clampHour(streamlitArgs.selected_offset));
+        const [loadedHour, setLoadedHour] = React.useState(clampHour(streamlitArgs.selected_offset));
+        const [dragging, setDragging] = React.useState(false);
+        const startRef = React.useRef({x:0, idx:0, moved:false});
+        const railRef = React.useRef(null);
+        const viewportRef = React.useRef(null);
+        const draftRef = React.useRef(draftHour);
+        const labelsRef = React.useRef(args.labels || []);
+        const activeRef = React.useRef(!!args.active);
+
+        React.useEffect(() => {
+            window.__xwindSetArgs = (nextArgs) => {
+                const clean = Object.assign({labels: [], selected_offset: 0, active: false, phone: false, height: 126}, nextArgs || {});
+                const incoming = clampHour(clean.selected_offset);
+                setArgs(clean);
+                labelsRef.current = clean.labels || [];
+                activeRef.current = !!clean.active;
+                setLoadedHour(incoming);
+                // Since Python only changes selected_offset after LOAD, syncing
+                // the draft here will not fight rapid drag/click gestures.
+                setDraftHour(incoming);
+                draftRef.current = incoming;
+                setFrameHeight(Number(clean.height || (clean.phone ? 112 : 126)));
+            };
+            return () => { delete window.__xwindSetArgs; };
+        }, []);
+
+        React.useEffect(() => { draftRef.current = draftHour; }, [draftHour]);
+        React.useEffect(() => { labelsRef.current = args.labels || []; activeRef.current = !!args.active; }, [args]);
+
+        const labels = args.labels || [];
+        const active = !!args.active;
+        const phone = !!args.phone;
+        const chipW = phone ? 62 : 76;
+        const idx = indexFromOffset(labels, draftHour);
+        const loadedIdx = indexFromOffset(labels, loadedHour);
+        const selectedItem = labels.find(x => Number(x.offset) === Number(draftHour)) || labels[labels.length - 1] || {};
+        const dirty = Number(draftHour) !== Number(loadedHour);
+
+        React.useEffect(() => {
+            const viewport = viewportRef.current;
+            const rail = railRef.current;
+            if(!viewport || !rail || !labels.length) return;
+            const x = (viewport.clientWidth / 2) - (idx * chipW) - (chipW / 2);
+            rail.style.transform = `translateX(${x}px)`;
+        }, [draftHour, labels.length, phone]);
+
+        const stageHour = React.useCallback((hour) => {
+            if(!activeRef.current) return;
+            const clean = clampHour(hour);
+            draftRef.current = clean;
+            setDraftHour(clean);
+        }, []);
+
+        const commitLoadedHour = React.useCallback(() => {
+            if(!activeRef.current) return;
+            const snapped = clampHour(draftRef.current);
+            eventSeq += 1;
+            const ts = Date.now();
+            const eventId = `${componentInstanceId}_${eventSeq}_${snapped}_${ts}`;
+            try { window.parent.sessionStorage.setItem("xwind_scroll_y", String(window.parent.scrollY || 0)); } catch(err) {}
+            setLoadedHour(snapped);
+            setComponentValue({
+                hour: snapped,
+                committed: true,
+                event_id: eventId,
+                seq: eventSeq,
+                action: "load",
+                ts: ts,
+                render_nonce: String(args.render_nonce || ""),
+                instance_id: componentInstanceId
+            });
+        }, [args.render_nonce]);
+
+        const clientX = (ev) => {
+            if(ev.touches && ev.touches.length) return ev.touches[0].clientX;
+            if(ev.changedTouches && ev.changedTouches.length) return ev.changedTouches[0].clientX;
+            return ev.clientX;
+        };
+
+        const beginDrag = (ev) => {
+            if(!active) return;
+            const currentIdx = indexFromOffset(labels, draftRef.current);
+            startRef.current = {x: clientX(ev), idx: currentIdx, moved: false};
+            setDragging(true);
+        };
+
+        const moveDrag = React.useCallback((ev) => {
+            if(!dragging || !activeRef.current) return;
+            const labelsNow = labelsRef.current;
+            const dx = clientX(ev) - startRef.current.x;
+            if(Math.abs(dx) > 3) startRef.current.moved = true;
+            const idxFloat = startRef.current.idx - (dx / chipW);
+            const safeIdx = Math.max(0, Math.min(labelsNow.length - 1, idxFloat));
+            const viewport = viewportRef.current;
+            const rail = railRef.current;
+            if(viewport && rail){
+                rail.style.transition = "none";
+                const x = (viewport.clientWidth / 2) - (safeIdx * chipW) - (chipW / 2);
+                rail.style.transform = `translateX(${x}px)`;
+            }
+            const nextHour = offsetFromIndex(labelsNow, Math.round(safeIdx));
+            draftRef.current = nextHour;
+            setDraftHour(nextHour);
+            ev.preventDefault && ev.preventDefault();
+        }, [dragging, chipW]);
+
+        const endDrag = React.useCallback((ev) => {
+            if(!dragging) return;
+            const labelsNow = labelsRef.current;
+            let finalIdx = indexFromOffset(labelsNow, draftRef.current);
+            if(ev){
+                const dx = clientX(ev) - startRef.current.x;
+                const idxFloat = startRef.current.idx - (dx / chipW);
+                finalIdx = Math.round(Math.max(0, Math.min(labelsNow.length - 1, idxFloat)));
+            }
+            const finalHour = offsetFromIndex(labelsNow, finalIdx);
+            draftRef.current = finalHour;
+            setDraftHour(finalHour);
+            setDragging(false);
+            const rail = railRef.current;
+            if(rail){ rail.style.transition = "transform 500ms cubic-bezier(.17, .89, .28, 1.22)"; }
+        }, [dragging, chipW]);
+
+        React.useEffect(() => {
+            window.addEventListener("mousemove", moveDrag);
+            window.addEventListener("mouseup", endDrag);
+            window.addEventListener("touchmove", moveDrag, {passive:false});
+            window.addEventListener("touchend", endDrag);
+            window.addEventListener("touchcancel", endDrag);
+            window.addEventListener("blur", endDrag);
+            return () => {
+                window.removeEventListener("mousemove", moveDrag);
+                window.removeEventListener("mouseup", endDrag);
+                window.removeEventListener("touchmove", moveDrag);
+                window.removeEventListener("touchend", endDrag);
+                window.removeEventListener("touchcancel", endDrag);
+                window.removeEventListener("blur", endDrag);
+            };
+        }, [moveDrag, endDrag]);
+
+        const onWheel = (ev) => {
+            ev.preventDefault();
+            if(!active) return;
+            const direction = Math.sign(ev.deltaY || ev.deltaX);
+            if(direction === 0) return;
+            const currentIdx = indexFromOffset(labels, draftHour);
+            const nextIdx = Math.max(0, Math.min(labels.length - 1, currentIdx + direction));
+            stageHour(offsetFromIndex(labels, nextIdx));
+        };
+
+        const shellClass = `shell${phone ? " phone" : ""}${active ? "" : " off"}`;
+        return e("div", {className: shellClass},
+            e("div", {className: `inside-toggle${active ? "" : " off"}`}, e("span", {className:"knob"}), e("span", null, "24h")),
+            e("div", {className:"top"},
+                e("span", {className:"pill"}, Number(selectedItem.offset) === 0 ? "CURRENT" : `${selectedItem.offset || 0}H AGO`),
+                e("span", {className:"timebits"},
+                    e("span", null, e("b", null, "UTC"), " ", e("span", null, selectedItem.utc || "—")),
+                    e("span", null, e("b", null, "LOCAL"), " ", e("span", null, selectedItem.local || "—"))
+                )
+            ),
+            e("div", {className:"hint"}, "drag / wheel"),
+            e("div", {className:`viewport${dragging ? " dragging" : ""}`, ref:viewportRef, onMouseDown:beginDrag, onTouchStart:beginDrag, onWheel:onWheel},
+                e("div", {className:"rail", ref:railRef}, labels.map((item, i) => {
+                    const activeChip = Number(item.offset) === Number(draftHour);
+                    const loadedChip = Number(item.offset) === Number(loadedHour);
+                    return e("div", {key:item.offset, className:`chip${activeChip ? " active" : ""}${loadedChip ? " loaded" : ""}`, onClick:() => stageHour(item.offset)},
+                        e("div", {className:"age"}, item.age),
+                        e("div", {className:"utc"}, item.utc)
+                    );
+                }))
+            ),
+            e("div", {className:"glow"}),
+            e("div", {className:"marker"}),
+            e("div", {className:"bottom"}, e("span", null, "23h ago"), e("span", null, dirty ? "staged" : "loaded"), e("span", null, "current")),
+            e("span", {className:`dirty-dot${dirty ? " on" : ""}`}),
+            e("button", {className:"load", disabled:!active || !dirty, onClick:commitLoadedHour}, dirty ? "LOAD" : "LOADED")
+        );
+    }
+
+    function render(){
+        if(!root) root = ReactDOM.createRoot(document.getElementById("root"));
+        root.render(React.createElement(TimelineApp));
+    }
+
+    window.addEventListener("message", function(event){
+        if(!event.data || event.data.type !== "streamlit:render") return;
+        streamlitArgs = event.data.args || {};
+        if(window.__xwindSetArgs) window.__xwindSetArgs(streamlitArgs);
+        render();
     });
-}
-function updateLabels(){
-    const item=labels.find(x=>Number(x.offset)===Number(selectedOffset))||labels[labels.length-1];
-    if(!item)return;
-    agePill.textContent=item.offset===0?"CURRENT":`${item.offset}H AGO`;
-    utcLabel.textContent=item.utc;
-    localLabel.textContent=item.local;
-    insideToggle.classList.toggle("off",!historyActive);
-    shell.classList.toggle("off",!historyActive);
-    shell.classList.toggle("phone",phone);
-    [...rail.children].forEach(chip=>chip.classList.toggle("active",Number(chip.dataset.offset)===Number(selectedOffset)));
-}
-function centerSelected(animate=true){
-    if(!labels.length)return;
-    const idx=selectedIndexFromOffset(selectedOffset);
-    const safeIdx=idx<0?labels.length-1:idx;
-    const vw=viewport.clientWidth;
-    const x=(vw/2)-(safeIdx*chipW)-(chipW/2);
-    rail.style.transition=animate?"transform 520ms cubic-bezier(.17,.89,.28,1.22)":"none";
-    rail.style.transform=`translateX(${x}px)`;
-    updateLabels();
-}
-function setComponentValue(payload){ send("streamlit:setComponentValue",{value:payload}); }
-function commitSelected(action="commit", explicitHour=null){
-    if(!historyActive)return;
-    const snapped=clampHour(explicitHour===null ? selectedOffset : explicitHour);
-    selectedOffset=snapped;
-    centerSelected(true);
-    commitSeq += 1;
-    const ts = Date.now();
-    const eventId = `${componentInstanceId}_${commitSeq}_${snapped}_${ts}`;
-    pendingCommitUntil = ts + 1200;
-    try{ window.parent.sessionStorage.setItem("xwind_scroll_y",String(window.parent.scrollY||0)); }catch(err){}
-    setComponentValue({
-        hour:snapped,
-        committed:true,
-        event_id:eventId,
-        seq:commitSeq,
-        action:action,
-        ts:ts,
-        render_nonce:renderNonce,
-        instance_id:componentInstanceId
-    });
-}
-function scheduleCommit(action="commit", explicitHour=null){
-    if(commitTimer)window.clearTimeout(commitTimer);
-    // Wait one tick after touch/mouse release so the rail has snapped to the
-    // final chip before Streamlit receives the committed hour.
-    commitTimer=window.setTimeout(()=>commitSelected(action, explicitHour), 90);
-}
-function selectOffset(offset,commit=false,action="select"){
-    if(!historyActive)return;
-    selectedOffset=clampHour(offset);
-    centerSelected(true);
-    if(commit){
-        scheduleCommit(action, selectedOffset);
-    }
-}
-let startX=0,startIdx=0,dragging=false,moved=false;
-function clientX(e){
-    if(e.touches&&e.touches.length)return e.touches[0].clientX;
-    if(e.changedTouches&&e.changedTouches.length)return e.changedTouches[0].clientX;
-    return e.clientX;
-}
-function startDrag(e){
-    if(!historyActive)return;
-    dragging=true;
-    moved=false;
-    viewport.classList.add("dragging");
-    startX=clientX(e);
-    startIdx=selectedIndexFromOffset(selectedOffset);
-    if(startIdx<0)startIdx=labels.length-1;
-    dragIdxFloat=startIdx;
-}
-function moveDrag(e){
-    if(!dragging)return;
-    const dx=clientX(e)-startX;
-    if(Math.abs(dx)>3)moved=true;
-    const idxFloat=startIdx-(dx/chipW);
-    const idx=Math.max(0,Math.min(labels.length-1,idxFloat));
-    dragIdxFloat=idx;
-    const vw=viewport.clientWidth;
-    const x=(vw/2)-(idx*chipW)-(chipW/2);
-    rail.style.transition="none";
-    rail.style.transform=`translateX(${x}px)`;
-    selectedOffset=offsetFromIndex(Math.round(idx));
-    updateLabels();
-    e.preventDefault();
-}
-function endDrag(e){
-    if(!dragging)return;
-    // Recalculate once from the final pointer location. Mobile Safari can fire
-    // touchend with a slightly newer changedTouch than the final touchmove.
-    if(e){
-        const dx=clientX(e)-startX;
-        const idxFloat=startIdx-(dx/chipW);
-        dragIdxFloat=Math.max(0,Math.min(labels.length-1,idxFloat));
-    }
-    dragging=false;
-    viewport.classList.remove("dragging");
-    const finalIdx=Math.round(dragIdxFloat===null ? selectedIndexFromOffset(selectedOffset) : dragIdxFloat);
-    selectedOffset=offsetFromIndex(finalIdx);
-    centerSelected(true);
-    if(moved)scheduleCommit("drag", selectedOffset);
-    dragIdxFloat=null;
-}
-viewport.addEventListener("mousedown",startDrag);
-window.addEventListener("mousemove",moveDrag);
-window.addEventListener("mouseup",e=>endDrag(e));
-viewport.addEventListener("touchstart",startDrag,{passive:false});
-viewport.addEventListener("touchmove",moveDrag,{passive:false});
-viewport.addEventListener("touchend",e=>endDrag(e));
-viewport.addEventListener("touchcancel",e=>endDrag(e));
-window.addEventListener("blur",()=>{if(dragging)endDrag();});
-viewport.addEventListener("wheel",e=>{
-    e.preventDefault();
-    if(!historyActive)return;
-    const direction=Math.sign(e.deltaY||e.deltaX);
-    if(direction===0)return;
-    const idx=selectedIndexFromOffset(selectedOffset);
-    const safeIdx=idx<0?labels.length-1:idx;
-    const nextIdx=Math.max(0,Math.min(labels.length-1,safeIdx+direction));
-    selectOffset(offsetFromIndex(nextIdx),true,"wheel");
-},{passive:false});
-window.addEventListener("message",event=>{
-    if(!event.data||event.data.type!=="streamlit:render")return;
-    const args=event.data.args||{};
-    labels=args.labels||[];
-    historyActive=!!args.active;
-    phone=!!args.phone;
-    chipW=phone?62:76;
-    renderNonce=String(args.render_nonce || "none");
-    const incoming=clampHour(args.selected_offset||0);
-    // Python is source of truth, but do not immediately yank the rail back
-    // during the tiny window after a user commit is sent and before Streamlit
-    // applies that value. This prevents visible snap-back and stale replays.
-    if(Date.now() > pendingCommitUntil){
-        selectedOffset=incoming;
-    }
-    lastRenderOffset=incoming;
-    rebuildChips();
-    centerSelected(false);
-    setFrameHeight(Number(args.height||(phone?104:118)));
-});
-componentReady(); setFrameHeight(118);
+
+    componentReady();
+    setFrameHeight(126);
+    render();
+})();
 </script>
 </body>
 </html>'''
     index_file.write_text(component_html, encoding="utf-8")
-    return components.declare_component("xwind_history_timeline_return_v3", path=str(component_dir))
+    return components.declare_component("xwind_react_history_timeline", path=str(component_dir))
 
 
 @st.cache_resource
@@ -1307,12 +1375,18 @@ def get_xwind_timeline_component():
 
 
 def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Angeles", phone=False, key_prefix="timeline", active=False):
-    # Render the custom timeline as a real Streamlit component and return selected hour.
+    """Render the React timeline and return the loaded/committed hour.
+
+    The component stages interaction locally, then returns a value only when the
+    LOAD button is pressed. This prevents stale component values from previous
+    reruns from pushing the app back to an old hour.
+    """
     try:
         hour_offset = int(hour_offset)
     except Exception:
         hour_offset = 0
     hour_offset = max(0, min(23, hour_offset))
+
     now_utc = pd.Timestamp.now(tz="UTC").floor("h")
     labels = []
     for h in range(23, -1, -1):
@@ -1321,8 +1395,14 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
             ts_local = ts_utc.tz_convert(ZoneInfo(timezone_name))
         except Exception:
             ts_local = ts_utc.tz_convert(ZoneInfo("America/Los_Angeles"))
-        labels.append({"offset": h, "age": "NOW" if h == 0 else f"-{h}h", "utc": ts_utc.strftime("%H:%MZ"), "local": ts_local.strftime("%H:%M %Z")})
-    height = 104 if phone else 118
+        labels.append({
+            "offset": h,
+            "age": "NOW" if h == 0 else f"-{h}h",
+            "utc": ts_utc.strftime("%H:%MZ"),
+            "local": ts_local.strftime("%H:%M %Z"),
+        })
+
+    height = 112 if phone else 126
     timeline_component = get_xwind_timeline_component()
     selected = timeline_component(
         labels=labels,
@@ -1330,20 +1410,13 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
         active=bool(active),
         phone=bool(phone),
         height=height,
-        render_nonce=f"{key_prefix}_{int(pd.Timestamp.now(tz='UTC').timestamp() * 1000)}_{hour_offset}_{int(bool(active))}",
-        key=f"xwind_timeline_{key_prefix}",
+        render_nonce=f"{key_prefix}_{int(now_utc.timestamp())}_{hour_offset}_{int(bool(active))}",
+        key=f"xwind_react_timeline_{key_prefix}",
         default={"hour": hour_offset, "committed": False, "event_id": "default", "seq": 0, "action": "default"},
     )
 
-    # Robust return handling:
-    # - The component returns a dict only after a confirmed commit: click, wheel, or drag-end.
-    # - A monotonically increasing seq prevents stale component values from overwriting newer choices.
-    # - Older int returns are still accepted for backward compatibility.
     if selected is None:
         return hour_offset
-
-    committed_hour = None
-    committed_seq = None
 
     if isinstance(selected, dict):
         if not selected.get("committed", False):
@@ -1352,19 +1425,16 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
             committed_hour = max(0, min(23, int(selected.get("hour", hour_offset))))
         except Exception:
             return hour_offset
+
         event_id = str(selected.get("event_id", ""))
         current_hour = int(st.session_state.get("history_hour_offset", hour_offset))
-
-        # Streamlit components return their last value again on every rerun.
-        # A unique event_id lets Python accept each real user commit exactly once
-        # and ignore replayed stale commits from earlier clicks/drags.
-        seen_key = f"xwind_timeline_seen_events_{key_prefix}"
+        seen_key = f"xwind_react_timeline_seen_events_{key_prefix}"
         seen_events = st.session_state.get(seen_key, [])
         if event_id and event_id in seen_events:
             return current_hour
 
         if event_id:
-            seen_events = (seen_events + [event_id])[-20:]
+            seen_events = (seen_events + [event_id])[-30:]
             st.session_state[seen_key] = seen_events
 
         st.session_state.history_hour_offset = committed_hour
