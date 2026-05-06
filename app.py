@@ -1076,28 +1076,134 @@ def ensure_xwind_timeline_component():
         <div class="bottom"><span>23h ago</span><span>fixed marker</span><span>current</span></div>
     </div>
 <script>
-let labels=[], selectedOffset=0, historyActive=false, phone=false, chipW=76, lastSentOffset=null;
+let labels=[], selectedOffset=0, historyActive=false, phone=false, chipW=76;
+let lastCommittedOffset=null, lastRenderOffset=null, commitSeq=0, suppressNextRender=false;
 const rail=document.getElementById("rail"), viewport=document.getElementById("viewport"), agePill=document.getElementById("agePill"), utcLabel=document.getElementById("utcLabel"), localLabel=document.getElementById("localLabel"), insideToggle=document.getElementById("insideToggle"), shell=document.getElementById("shell");
 function send(type,data){ window.parent.postMessage(Object.assign({isStreamlitMessage:true,type:type},data),"*"); }
 function setFrameHeight(height){ send("streamlit:setFrameHeight",{height:height}); }
-function setComponentValue(value){ lastSentOffset=Number(value); send("streamlit:setComponentValue",{value:Number(value)}); }
 function componentReady(){ send("streamlit:componentReady",{apiVersion:1}); }
 function selectedIndexFromOffset(offset){ return labels.findIndex(x=>Number(x.offset)===Number(offset)); }
 function offsetFromIndex(index){ index=Math.max(0,Math.min(labels.length-1,index)); return Number(labels[index].offset); }
-function rebuildChips(){ rail.innerHTML=""; labels.forEach(item=>{ const div=document.createElement("div"); div.className="chip"; div.dataset.offset=item.offset; div.innerHTML=`<div class="age">${item.age}</div><div class="utc">${item.utc}</div>`; div.addEventListener("click",()=>selectOffset(item.offset,true)); rail.appendChild(div); }); }
-function updateLabels(){ const item=labels.find(x=>Number(x.offset)===Number(selectedOffset))||labels[labels.length-1]; if(!item)return; agePill.textContent=item.offset===0?"CURRENT":`${item.offset}H AGO`; utcLabel.textContent=item.utc; localLabel.textContent=item.local; insideToggle.classList.toggle("off",!historyActive); shell.classList.toggle("off",!historyActive); shell.classList.toggle("phone",phone); [...rail.children].forEach(chip=>chip.classList.toggle("active",Number(chip.dataset.offset)===Number(selectedOffset))); }
-function centerSelected(animate=true){ if(!labels.length)return; const idx=selectedIndexFromOffset(selectedOffset); const safeIdx=idx<0?labels.length-1:idx; const vw=viewport.clientWidth; const x=(vw/2)-(safeIdx*chipW)-(chipW/2); rail.style.transition=animate?"transform 520ms cubic-bezier(.17,.89,.28,1.22)":"none"; rail.style.transform=`translateX(${x}px)`; updateLabels(); }
-function commitSelected(){ if(!historyActive)return; if(Number(selectedOffset)===Number(lastSentOffset))return; try{ window.parent.sessionStorage.setItem("xwind_scroll_y",String(window.parent.scrollY||0)); }catch(err){} setComponentValue(selectedOffset); }
-function selectOffset(offset,commit=false){ if(!historyActive)return; selectedOffset=Math.max(0,Math.min(23,Number(offset))); centerSelected(true); if(commit)commitSelected(); }
+function clampHour(value){ return Math.max(0,Math.min(23,Number(value))); }
+function rebuildChips(){
+    rail.innerHTML="";
+    labels.forEach(item=>{
+        const div=document.createElement("div");
+        div.className="chip";
+        div.dataset.offset=item.offset;
+        div.innerHTML=`<div class="age">${item.age}</div><div class="utc">${item.utc}</div>`;
+        div.addEventListener("click",()=>selectOffset(item.offset,true,"click"));
+        rail.appendChild(div);
+    });
+}
+function updateLabels(){
+    const item=labels.find(x=>Number(x.offset)===Number(selectedOffset))||labels[labels.length-1];
+    if(!item)return;
+    agePill.textContent=item.offset===0?"CURRENT":`${item.offset}H AGO`;
+    utcLabel.textContent=item.utc;
+    localLabel.textContent=item.local;
+    insideToggle.classList.toggle("off",!historyActive);
+    shell.classList.toggle("off",!historyActive);
+    shell.classList.toggle("phone",phone);
+    [...rail.children].forEach(chip=>chip.classList.toggle("active",Number(chip.dataset.offset)===Number(selectedOffset)));
+}
+function centerSelected(animate=true){
+    if(!labels.length)return;
+    const idx=selectedIndexFromOffset(selectedOffset);
+    const safeIdx=idx<0?labels.length-1:idx;
+    const vw=viewport.clientWidth;
+    const x=(vw/2)-(safeIdx*chipW)-(chipW/2);
+    rail.style.transition=animate?"transform 520ms cubic-bezier(.17,.89,.28,1.22)":"none";
+    rail.style.transform=`translateX(${x}px)`;
+    updateLabels();
+}
+function setComponentValue(payload){ send("streamlit:setComponentValue",{value:payload}); }
+function commitSelected(action="commit"){
+    if(!historyActive)return;
+    const snapped=clampHour(selectedOffset);
+    selectedOffset=snapped;
+    centerSelected(true);
+    if(Number(snapped)===Number(lastCommittedOffset))return;
+    commitSeq += 1;
+    lastCommittedOffset=snapped;
+    try{ window.parent.sessionStorage.setItem("xwind_scroll_y",String(window.parent.scrollY||0)); }catch(err){}
+    setComponentValue({hour:snapped, committed:true, seq:commitSeq, action:action, ts:Date.now()});
+}
+function selectOffset(offset,commit=false,action="select"){
+    if(!historyActive)return;
+    selectedOffset=clampHour(offset);
+    centerSelected(true);
+    if(commit){
+        window.setTimeout(()=>commitSelected(action), 0);
+    }
+}
 let startX=0,startIdx=0,dragging=false,moved=false;
 function clientX(e){ if(e.touches&&e.touches.length)return e.touches[0].clientX; return e.clientX; }
-function startDrag(e){ if(!historyActive)return; dragging=true; moved=false; viewport.classList.add("dragging"); startX=clientX(e); startIdx=selectedIndexFromOffset(selectedOffset); }
-function moveDrag(e){ if(!dragging)return; const dx=clientX(e)-startX; if(Math.abs(dx)>3)moved=true; const idxFloat=startIdx-(dx/chipW); const idx=Math.max(0,Math.min(labels.length-1,idxFloat)); const vw=viewport.clientWidth; const x=(vw/2)-(idx*chipW)-(chipW/2); rail.style.transition="none"; rail.style.transform=`translateX(${x}px)`; selectedOffset=offsetFromIndex(Math.round(idx)); updateLabels(); e.preventDefault(); }
-function endDrag(){ if(!dragging)return; dragging=false; viewport.classList.remove("dragging"); centerSelected(true); if(moved)commitSelected(); }
-viewport.addEventListener("mousedown",startDrag); window.addEventListener("mousemove",moveDrag); window.addEventListener("mouseup",endDrag);
-viewport.addEventListener("touchstart",startDrag,{passive:false}); viewport.addEventListener("touchmove",moveDrag,{passive:false}); viewport.addEventListener("touchend",endDrag); viewport.addEventListener("touchcancel",endDrag); window.addEventListener("blur",()=>{if(dragging)endDrag();});
-viewport.addEventListener("wheel",e=>{ e.preventDefault(); if(!historyActive)return; const direction=Math.sign(e.deltaY||e.deltaX); const idx=selectedIndexFromOffset(selectedOffset); const nextIdx=Math.max(0,Math.min(labels.length-1,idx+direction)); selectOffset(offsetFromIndex(nextIdx),true); },{passive:false});
-window.addEventListener("message",event=>{ if(!event.data||event.data.type!=="streamlit:render")return; const args=event.data.args||{}; labels=args.labels||[]; selectedOffset=Number(args.selected_offset||0); historyActive=!!args.active; phone=!!args.phone; chipW=phone?62:76; lastSentOffset=Number(args.selected_offset||0); rebuildChips(); centerSelected(false); setFrameHeight(Number(args.height||(phone?104:118))); });
+function startDrag(e){
+    if(!historyActive)return;
+    dragging=true;
+    moved=false;
+    viewport.classList.add("dragging");
+    startX=clientX(e);
+    startIdx=selectedIndexFromOffset(selectedOffset);
+    if(startIdx<0)startIdx=labels.length-1;
+}
+function moveDrag(e){
+    if(!dragging)return;
+    const dx=clientX(e)-startX;
+    if(Math.abs(dx)>3)moved=true;
+    const idxFloat=startIdx-(dx/chipW);
+    const idx=Math.max(0,Math.min(labels.length-1,idxFloat));
+    const vw=viewport.clientWidth;
+    const x=(vw/2)-(idx*chipW)-(chipW/2);
+    rail.style.transition="none";
+    rail.style.transform=`translateX(${x}px)`;
+    selectedOffset=offsetFromIndex(Math.round(idx));
+    updateLabels();
+    e.preventDefault();
+}
+function endDrag(){
+    if(!dragging)return;
+    dragging=false;
+    viewport.classList.remove("dragging");
+    selectedOffset=clampHour(selectedOffset);
+    centerSelected(true);
+    if(moved)commitSelected("drag");
+}
+viewport.addEventListener("mousedown",startDrag);
+window.addEventListener("mousemove",moveDrag);
+window.addEventListener("mouseup",endDrag);
+viewport.addEventListener("touchstart",startDrag,{passive:false});
+viewport.addEventListener("touchmove",moveDrag,{passive:false});
+viewport.addEventListener("touchend",endDrag);
+viewport.addEventListener("touchcancel",endDrag);
+window.addEventListener("blur",()=>{if(dragging)endDrag();});
+viewport.addEventListener("wheel",e=>{
+    e.preventDefault();
+    if(!historyActive)return;
+    const direction=Math.sign(e.deltaY||e.deltaX);
+    if(direction===0)return;
+    const idx=selectedIndexFromOffset(selectedOffset);
+    const safeIdx=idx<0?labels.length-1:idx;
+    const nextIdx=Math.max(0,Math.min(labels.length-1,safeIdx+direction));
+    selectOffset(offsetFromIndex(nextIdx),true,"wheel");
+},{passive:false});
+window.addEventListener("message",event=>{
+    if(!event.data||event.data.type!=="streamlit:render")return;
+    const args=event.data.args||{};
+    labels=args.labels||[];
+    historyActive=!!args.active;
+    phone=!!args.phone;
+    chipW=phone?62:76;
+    const incoming=clampHour(args.selected_offset||0);
+    // Treat Python's selected_offset as the source of truth after a rerun.
+    selectedOffset=incoming;
+    lastRenderOffset=incoming;
+    lastCommittedOffset=incoming;
+    rebuildChips();
+    centerSelected(false);
+    setFrameHeight(Number(args.height||(phone?104:118)));
+});
 componentReady(); setFrameHeight(118);
 </script>
 </body>
@@ -1129,11 +1235,52 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
         labels.append({"offset": h, "age": "NOW" if h == 0 else f"-{h}h", "utc": ts_utc.strftime("%H:%MZ"), "local": ts_local.strftime("%H:%M %Z")})
     height = 104 if phone else 118
     timeline_component = get_xwind_timeline_component()
-    selected = timeline_component(labels=labels, selected_offset=hour_offset, active=bool(active), phone=bool(phone), height=height, key=f"xwind_timeline_{key_prefix}", default=hour_offset)
+    selected = timeline_component(
+        labels=labels,
+        selected_offset=hour_offset,
+        active=bool(active),
+        phone=bool(phone),
+        height=height,
+        key=f"xwind_timeline_{key_prefix}",
+        default={"hour": hour_offset, "committed": False, "seq": 0, "action": "default"},
+    )
+
+    # Robust return handling:
+    # - The component returns a dict only after a confirmed commit: click, wheel, or drag-end.
+    # - A monotonically increasing seq prevents stale component values from overwriting newer choices.
+    # - Older int returns are still accepted for backward compatibility.
     if selected is None:
         return hour_offset
+
+    committed_hour = None
+    committed_seq = None
+
+    if isinstance(selected, dict):
+        if not selected.get("committed", False):
+            return hour_offset
+        try:
+            committed_hour = max(0, min(23, int(selected.get("hour", hour_offset))))
+        except Exception:
+            return hour_offset
+        try:
+            committed_seq = int(selected.get("seq", 0))
+        except Exception:
+            committed_seq = 0
+
+        seq_key = f"xwind_timeline_last_seq_{key_prefix}"
+        last_seq = int(st.session_state.get(seq_key, -1))
+        if committed_seq <= last_seq and committed_hour == int(st.session_state.get("history_hour_offset", hour_offset)):
+            return int(st.session_state.get("history_hour_offset", hour_offset))
+        st.session_state[seq_key] = committed_seq
+        st.session_state.history_hour_offset = committed_hour
+        st.session_state.history_slider_pos = 23 - committed_hour
+        return committed_hour
+
     try:
-        return max(0, min(23, int(selected)))
+        committed_hour = max(0, min(23, int(selected)))
+        st.session_state.history_hour_offset = committed_hour
+        st.session_state.history_slider_pos = 23 - committed_hour
+        return committed_hour
     except Exception:
         return hour_offset
 
