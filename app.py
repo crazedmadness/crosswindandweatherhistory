@@ -879,7 +879,12 @@ def pick_observation_for_target(obs_list, target_time, max_staleness_minutes=95)
 
 
 def build_24h_ranked_snapshots(icaos_tuple, runway_ends_by_icao, min_wind, min_len, top_n=30):
-    """Build 24 hourly ranked snapshots."""
+    """Build 24 hourly ranked snapshots from the supplied airport list.
+
+    This is still used as a small helper, but history mode now uses
+    build_24h_hourly_top_union_bundle() so the displayed candidate pool is the
+    union of every hour's Top 15.
+    """
     icaos = tuple(sorted(str(x).upper().strip() for x in icaos_tuple if str(x).strip()))
     histories = get_metar_histories_bulk(icaos, hours=25)
     now_utc = pd.Timestamp.now(tz="UTC").floor("h")
@@ -903,6 +908,80 @@ def build_24h_ranked_snapshots(icaos_tuple, runway_ends_by_icao, min_wind, min_l
         snapshots[hour_offset] = sorted(rows, key=lambda x: x["cw"], reverse=True)[:top_n]
 
     return snapshots
+
+
+def build_24h_hourly_top_union_bundle(icaos_tuple, runway_ends_by_icao, min_wind, min_len, top_n=15):
+    """Build the exact history-mode model the slider needs.
+
+    Logic:
+    1. For each of the last 24 hourly targets, calculate the Top N airports
+       from the full active airport set (US or global, depending on the toggle).
+    2. Union those hourly Top N airport ICAOs into one candidate pool.
+    3. Using that candidate pool's already-fetched 24h METAR histories, rebuild
+       hourly snapshots so selecting any hour returns that hour's Top N airports.
+
+    This means the slider is not stuck with only the current Top N airports, and
+    it also is not using one single "peak across 24h" list. Each selected hour
+    gets its own Top N ranking, while the cache contains the union of all hourly
+    winners.
+    """
+    icaos = tuple(sorted(str(x).upper().strip() for x in icaos_tuple if str(x).strip()))
+    histories = get_metar_histories_bulk(icaos, hours=25)
+    now_utc = pd.Timestamp.now(tz="UTC").floor("h")
+
+    hourly_full_rankings = {}
+    hourly_top_icaos = {}
+    union_icaos = set()
+
+    for hour_offset in range(24):
+        target_time = now_utc - pd.Timedelta(hours=hour_offset)
+        rows = []
+
+        for icao in icaos:
+            m = pick_observation_for_target(histories.get(icao, []), target_time)
+            if not m:
+                continue
+
+            result = result_from_metar_snapshot(icao, m, runway_ends_by_icao, min_wind, min_len)
+            if result:
+                result["history_hour_offset"] = hour_offset
+                result["snapshot_target_utc"] = target_time
+                rows.append(result)
+
+        ranked = sorted(rows, key=lambda x: x["cw"], reverse=True)
+        top_rows = ranked[:top_n]
+        hourly_full_rankings[hour_offset] = ranked
+        hourly_top_icaos[hour_offset] = [row["icao"] for row in top_rows]
+        union_icaos.update(row["icao"] for row in top_rows)
+
+    candidate_icaos = tuple(sorted(union_icaos))
+    snapshots = {}
+
+    for hour_offset in range(24):
+        target_time = now_utc - pd.Timedelta(hours=hour_offset)
+        rows = []
+
+        for icao in candidate_icaos:
+            m = pick_observation_for_target(histories.get(icao, []), target_time)
+            if not m:
+                continue
+
+            result = result_from_metar_snapshot(icao, m, runway_ends_by_icao, min_wind, min_len)
+            if result:
+                result["history_hour_offset"] = hour_offset
+                result["snapshot_target_utc"] = target_time
+                rows.append(result)
+
+        snapshots[hour_offset] = sorted(rows, key=lambda x: x["cw"], reverse=True)[:top_n]
+
+    return {
+        "snapshots": snapshots,
+        "candidate_icaos": list(candidate_icaos),
+        "hourly_top_icaos": hourly_top_icaos,
+        "candidate_pool_size": len(candidate_icaos),
+        "active_airport_count": len(icaos),
+        "built_at_utc": pd.Timestamp.now(tz="UTC"),
+    }
 
 
 def history_snapshot_times(hour_offset, timezone_name="America/Los_Angeles"):
@@ -1061,6 +1140,8 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
 
 def render_history_slider_controls(title_text, phone=False, show_title=True):
     # Always-visible timeline scrubber with Streamlit-owned history on/off.
+    # Desktop/tablet layout: title + 24h checkbox on the left, compact fancy
+    # timeline on the right. Phone stays stacked so it does not get cramped.
     timezone_name = get_viewer_timezone()
     try:
         # Only restore the selected hour from the URL. history_mode is owned by
@@ -1074,32 +1155,69 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
             st.session_state.history_slider_pos = 23 - st.session_state.history_hour_offset
     except Exception:
         pass
-    st.markdown('''
+
+    st.markdown("""
         <style>
             :root { --xwind-teal:#12d6cb; --xwind-teal-soft:rgba(18,214,203,0.18); --xwind-teal-mid:rgba(18,214,203,0.42); }
             .xwind-list-title { font-size: 1.28rem; line-height: 1.05; font-weight: 900; margin: 0rem 0 0.05rem 0; }
+            .xwind-title-toggle-box { padding-top: 0.15rem; }
             .history-streamlit-toggle { margin-top: -3px; margin-bottom: 2px; }
             .history-streamlit-toggle label { font-size: 0.74rem !important; font-weight: 900 !important; color: #dffffd !important; white-space: nowrap !important; }
             .history-streamlit-toggle [data-testid="stWidgetLabel"] p { font-size: 0.74rem !important; font-weight: 900 !important; }
+            .history-slider-compact-wrap { max-width: 620px; margin-left: auto; }
             .global-under-title { margin-top:-2px; margin-bottom:2px; }
             .global-under-title div[data-testid="stCheckbox"] label { font-size: 0.76rem !important; font-weight: 850 !important; white-space: nowrap !important; }
-            @media (max-width: 760px) { .xwind-list-title { font-size: 1rem; padding-top:0px; } }
+            @media (max-width: 760px) {
+                .xwind-list-title { font-size: 1rem; padding-top:0px; }
+                .history-slider-compact-wrap { max-width: 100%; margin-left: 0; }
+            }
         </style>
-        ''', unsafe_allow_html=True)
-    if show_title:
-        st.markdown(f"<div id='xwind-history-anchor' class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
-    st.markdown("<div class='history-streamlit-toggle'>", unsafe_allow_html=True)
-    # Use checkbox instead of st.toggle here because it preserves state more
-    # predictably across custom-component reruns on Streamlit Cloud/mobile.
-    history_enabled = st.checkbox(
-        "24h history slider",
-        key="history_mode",
-        help="Build/cache the Top 15 airport history, then use the scrubber below to move between hours.",
-    )
-    st.markdown("</div>", unsafe_allow_html=True)
+        """, unsafe_allow_html=True)
+
     hour_offset = int(st.session_state.get("history_hour_offset", 0))
     hour_offset = max(0, min(23, hour_offset))
-    selected_hour = render_history_timeline_scrubber(hour_offset, timezone_name=timezone_name, phone=phone, key_prefix="phone" if phone else "wide", active=history_enabled)
+
+    if phone:
+        if show_title:
+            st.markdown(f"<div id='xwind-history-anchor' class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
+        st.markdown("<div class='history-streamlit-toggle'>", unsafe_allow_html=True)
+        history_enabled = st.checkbox(
+            "24h history slider",
+            key="history_mode",
+            help="Build/cache each hour's Top 15, then use the scrubber below to move between hours.",
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+        selected_hour = render_history_timeline_scrubber(
+            hour_offset,
+            timezone_name=timezone_name,
+            phone=phone,
+            key_prefix="phone",
+            active=history_enabled,
+        )
+    else:
+        left_col, slider_col = st.columns([0.34, 0.66], gap="small")
+        with left_col:
+            st.markdown("<div class='xwind-title-toggle-box'>", unsafe_allow_html=True)
+            if show_title:
+                st.markdown(f"<div id='xwind-history-anchor' class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
+            st.markdown("<div class='history-streamlit-toggle'>", unsafe_allow_html=True)
+            history_enabled = st.checkbox(
+                "24h history slider",
+                key="history_mode",
+                help="Build/cache each hour's Top 15, then use the scrubber to move between hours.",
+            )
+            st.markdown("</div></div>", unsafe_allow_html=True)
+        with slider_col:
+            st.markdown("<div class='history-slider-compact-wrap'>", unsafe_allow_html=True)
+            selected_hour = render_history_timeline_scrubber(
+                hour_offset,
+                timezone_name=timezone_name,
+                phone=phone,
+                key_prefix="wide",
+                active=history_enabled,
+            )
+            st.markdown("</div>", unsafe_allow_html=True)
+
     if history_enabled:
         hour_offset = max(0, min(23, int(selected_hour)))
     else:
@@ -1923,7 +2041,7 @@ if "global_toggle_top" not in st.session_state:
 
 
 # Bump this when the cached time-slider row shape changes.
-HISTORY_SNAPSHOT_CACHE_VERSION = "2026-05-05-hourly-top15-commit-v6"
+HISTORY_SNAPSHOT_CACHE_VERSION = "2026-05-06-hourly-union-top15-layout-v7"
 
 if st.session_state.get("history_snapshot_cache_version") != HISTORY_SNAPSHOT_CACHE_VERSION:
     for _key in [
@@ -2214,47 +2332,22 @@ def history_cache_key(active_icaos, use_global, min_wind, min_len, history_top_n
 
 
 def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, history_top_n=HISTORY_TOP_N, live_results=None):
+    """Build/cache history mode using the union of each hour's Top 15 airports.
+
+    This intentionally does NOT start from the current live Top 15/30. It scans
+    the full active set (US or global), finds Top 15 for every hour, unions
+    those hourly winners, and then stores Top 15 rows for each selected hour.
+    """
     if "history_snapshot_cache" not in st.session_state:
         st.session_state.history_snapshot_cache = {}
 
-    """Build/cache the 24-hour history bundle for the Top 15 candidate airports."""
     key = history_cache_key(active_icaos, use_global, min_wind, min_len, history_top_n)
     cache = st.session_state.get("history_snapshot_cache", {})
     st.session_state.history_snapshot_cache = cache
 
     if key not in cache:
-        candidate_limit = int(history_top_n)  # keep this fast/reliable: only build the 24h cache for the displayed Top 15
-        candidates = []
-        seen = set()
-
-        # Start from live ranked results. This mirrors the airports most likely
-        # to remain relevant across the last 24 hours without fetching the world.
-        for row in (live_results or []):
-            icao = str(row.get("icao", "")).upper().strip()
-            if icao and icao not in seen:
-                candidates.append(icao)
-                seen.add(icao)
-            if len(candidates) >= candidate_limit:
-                break
-
-        # Always include the current selected/search airport.
-        selected = str(st.session_state.get("selected_icao") or "").upper().strip()
-        if selected and selected not in seen:
-            candidates.append(selected)
-            seen.add(selected)
-
-        # Fallback if live winds are sparse.
-        if len(candidates) < int(history_top_n):
-            for icao in active_icaos:
-                icao = str(icao).upper().strip()
-                if icao and icao not in seen:
-                    candidates.append(icao)
-                    seen.add(icao)
-                if len(candidates) >= candidate_limit:
-                    break
-
-        snapshots = build_24h_ranked_snapshots(
-            tuple(candidates),
+        bundle = build_24h_hourly_top_union_bundle(
+            active_icaos,
             runway_ends_by_icao,
             min_wind,
             min_len,
@@ -2262,16 +2355,12 @@ def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_b
         )
 
         # Make every snapshot row safe for both the list and map.
+        snapshots = bundle.get("snapshots", {})
         for hour_offset, rows in list(snapshots.items()):
             snapshots[hour_offset] = enrich_snapshot_rows_with_airport_metadata(rows, airport_lookup)
 
-        candidate_icaos = sorted({row["icao"] for rows in snapshots.values() for row in rows})
-        cache[key] = {
-            "snapshots": snapshots,
-            "candidate_icaos": candidate_icaos,
-            "candidate_pool_size": len(candidates),
-            "built_at_utc": pd.Timestamp.now(tz="UTC"),
-        }
+        bundle["snapshots"] = snapshots
+        cache[key] = bundle
 
     return cache[key]
 
