@@ -1,8 +1,5 @@
 import math
 import html
-import json
-import hashlib
-import time
 import pandas as pd
 import requests
 import streamlit as st
@@ -25,12 +22,6 @@ CLOSED_RUNWAYS = {
 
 LIVE_TOP_N_DEFAULT = 30
 HISTORY_TOP_N = 15
-
-# Server-side precomputed history cache.
-# The app reads this first so users usually get instant hourly Top 15 results.
-# A manual Refresh clears it and forces a fresh AviationWeather pull.
-PRECOMPUTED_CACHE_DIR = Path(".xwind_precomputed_cache")
-PRECOMPUTED_CACHE_TTL_SECONDS = 30 * 60
 
 st.set_page_config(page_title="Crosswind and Weather History", layout="wide")
 
@@ -2529,27 +2520,6 @@ else:
 st.session_state.min_len = min_len
 st.session_state.top_n = top_n
 st.session_state.layout_mode = layout_mode
-# Put the history/global controls directly under the banner/options row.
-# On wide/tablet layouts, keep this strip inside the same left-column width
-# as the airport row list so the slider stops before the map column begins.
-# The global checkbox here owns the active airport set.
-_history_title_for_topbar = "Global Crosswinds" if st.session_state.use_global else "US Crosswinds"
-if is_phone:
-    history_enabled, hour_offset, use_global = render_history_slider_controls(
-        _history_title_for_topbar,
-        phone=True,
-    )
-else:
-    history_top_left, history_top_right = st.columns([2, 1], gap="small")
-    with history_top_left:
-        history_enabled, hour_offset, use_global = render_history_slider_controls(
-            _history_title_for_topbar,
-            phone=False,
-        )
-    with history_top_right:
-        st.empty()
-# Do not assign st.session_state.use_global here. The checkbox with key="use_global" owns that value.
-
 # Responsive behavior based on viewport width.
 # Phone and narrow tablet load stacked. iPad landscape / desktop load wide.
 if is_phone:
@@ -2575,13 +2545,43 @@ else:
     row_window_height = 920
 
 if refresh:
+    # Back to the old on-demand model: clear Streamlit/API caches only.
+    # No disk/server-side precompute layer or timed server refresh is used.
     get_metars.clear()
     get_metar_history.clear()
     get_metar_histories_bulk.clear()
-    clear_precomputed_history_cache()
     st.session_state.history_snapshot_cache = {}
-    st.session_state.force_history_refresh_once = True
     st.rerun()
+
+# Put the history/global controls directly under the banner/options row.
+# In wide mode, create the main columns here so the map placeholder starts at
+# the same vertical height as the top of the nice timeline/control box.
+_history_title_for_topbar = "Global Crosswinds" if st.session_state.use_global else "US Crosswinds"
+map_slot = None
+search_slot = None
+main_left_col = None
+main_right_col = None
+
+if layout_mode == "Wide":
+    main_left_col, main_right_col = st.columns([2, 1])
+    with main_left_col:
+        history_enabled, hour_offset, use_global = render_history_slider_controls(
+            _history_title_for_topbar,
+            phone=False,
+        )
+    with main_right_col:
+        # This placeholder is intentionally created before any data fetch/build.
+        # When filled later, the map top aligns with the timeline box instead of
+        # starting below the left-side controls and row list.
+        map_slot = st.empty()
+        search_slot = st.empty()
+else:
+    history_enabled, hour_offset, use_global = render_history_slider_controls(
+        _history_title_for_topbar,
+        phone=is_phone,
+    )
+
+# Do not assign st.session_state.use_global here. The checkbox with key="use_global" owns that value.
 
 if use_global:
     active_airports = airports.copy()
@@ -2624,114 +2624,6 @@ list_title = "Global Crosswinds" if use_global else "US Crosswinds"
 active_icaos = tuple(sorted(active_airports["ident"].dropna().astype(str).unique()))
 
 
-
-def json_safe_value(value):
-    """Convert cached rows/bundles to JSON-safe values."""
-    try:
-        if value is None:
-            return None
-        if isinstance(value, pd.Timestamp):
-            if value.tzinfo is None:
-                value = value.tz_localize("UTC")
-            return value.isoformat()
-        if hasattr(value, "isoformat") and value.__class__.__name__ in {"Timestamp", "datetime", "date"}:
-            return value.isoformat()
-        if isinstance(value, dict):
-            return {str(k): json_safe_value(v) for k, v in value.items()}
-        if isinstance(value, (list, tuple, set)):
-            return [json_safe_value(v) for v in value]
-        if pd.isna(value):
-            return None
-    except Exception:
-        pass
-
-    try:
-        # numpy scalar support without importing numpy directly.
-        if hasattr(value, "item"):
-            return value.item()
-    except Exception:
-        pass
-
-    return value
-
-
-def restore_cached_time_values(obj):
-    """Restore timestamp-looking fields from disk cache back to pandas Timestamps."""
-    time_keys = {"obs_time", "snapshot_target_utc", "obs_hour_utc", "base_hour_utc", "built_at_utc"}
-
-    if isinstance(obj, dict):
-        restored = {}
-        for k, v in obj.items():
-            # JSON object keys are strings; hour snapshot keys need to be ints again.
-            out_key = int(k) if isinstance(k, str) and k.isdigit() else k
-            if k in time_keys and isinstance(v, str):
-                try:
-                    restored[out_key] = pd.Timestamp(v)
-                    continue
-                except Exception:
-                    pass
-            restored[out_key] = restore_cached_time_values(v)
-        return restored
-
-    if isinstance(obj, list):
-        return [restore_cached_time_values(v) for v in obj]
-
-    return obj
-
-
-def precomputed_cache_file(cache_key):
-    PRECOMPUTED_CACHE_DIR.mkdir(exist_ok=True)
-    digest = hashlib.sha256(json.dumps(json_safe_value(cache_key), sort_keys=True).encode("utf-8")).hexdigest()[:24]
-    return PRECOMPUTED_CACHE_DIR / f"history_{digest}.json"
-
-
-def load_precomputed_history_bundle(cache_key, ttl_seconds=PRECOMPUTED_CACHE_TTL_SECONDS):
-    """Load a fresh server-side precomputed bundle from disk, if present."""
-    path = precomputed_cache_file(cache_key)
-    if not path.exists():
-        return None
-
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        created_at = float(payload.get("created_at_epoch", 0))
-        if time.time() - created_at > ttl_seconds:
-            return None
-        bundle = payload.get("bundle")
-        if not isinstance(bundle, dict):
-            return None
-        return restore_cached_time_values(bundle)
-    except Exception:
-        return None
-
-
-def save_precomputed_history_bundle(cache_key, bundle):
-    """Save a computed history bundle so later sessions/users can read it instantly."""
-    path = precomputed_cache_file(cache_key)
-    payload = {
-        "created_at_epoch": time.time(),
-        "created_at_utc": pd.Timestamp.now(tz="UTC").isoformat(),
-        "bundle": json_safe_value(bundle),
-    }
-    try:
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
-        tmp.replace(path)
-    except Exception:
-        pass
-
-
-def clear_precomputed_history_cache():
-    """Clear disk-backed precomputed history cache files."""
-    try:
-        if PRECOMPUTED_CACHE_DIR.exists():
-            for path in PRECOMPUTED_CACHE_DIR.glob("history_*.json"):
-                try:
-                    path.unlink()
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
 def history_cache_key(active_icaos, use_global, min_wind, min_len, history_top_n):
     """Small stable key for the current history-mode inputs."""
     if active_icaos:
@@ -2758,12 +2650,7 @@ def history_cache_key(active_icaos, use_global, min_wind, min_len, history_top_n
 
 
 def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, history_top_n=HISTORY_TOP_N, live_results=None):
-    """Read/build the simple 24-list history bundle.
-
-    Priority:
-      1. in-session memory cache
-      2. disk-backed server-side precomputed cache, fresh for ~30 min
-      3. fresh AviationWeather fetch + compute + save to disk
+    """Build/cache the simple 24-list history bundle.
 
     snapshots[hour_offset] is already the Top 15 list for that exact hour,
     including the correct METAR/runway/crosswind data for that hour.
@@ -2775,44 +2662,24 @@ def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_b
     key = history_cache_key(active_icaos, use_global, min_wind, min_len, history_top_n)
     cache = st.session_state.get("history_snapshot_cache", {})
     st.session_state.history_snapshot_cache = cache
-    force_refresh = bool(st.session_state.pop("force_history_refresh_once", False))
 
-    if not force_refresh and key in cache:
-        bundle = cache[key]
-    else:
-        bundle = None
-        if not force_refresh:
-            bundle = load_precomputed_history_bundle(key)
+    if key not in cache:
+        bundle = build_24h_hourly_top15_bundle(
+            active_icaos,
+            runway_ends_by_icao,
+            min_len,
+            top_n=history_top_n,
+            live_results=live_results,
+        )
 
-        if bundle is None:
-            bundle = build_24h_hourly_top15_bundle(
-                active_icaos,
-                runway_ends_by_icao,
-                min_len,
-                top_n=history_top_n,
-                live_results=live_results,
-            )
+        snapshots = bundle.get("snapshots", {})
+        for hour_offset, rows in list(snapshots.items()):
+            snapshots[hour_offset] = enrich_snapshot_rows_with_airport_metadata(rows, airport_lookup)
 
-            snapshots = bundle.get("snapshots", {})
-            for hour_offset, rows in list(snapshots.items()):
-                snapshots[hour_offset] = enrich_snapshot_rows_with_airport_metadata(rows, airport_lookup)
-
-            bundle["snapshots"] = snapshots
-            save_precomputed_history_bundle(key, bundle)
-            bundle["cache_source"] = "fresh_fetch"
-        else:
-            bundle["cache_source"] = "disk_precomputed"
-
+        bundle["snapshots"] = snapshots
         cache[key] = bundle
 
-    # Keep NOW exactly aligned with the live-current ranking for this run.
-    # Older hours come from the precomputed bundle; hour 0 should match normal mode Top 15.
-    if live_results is not None:
-        snapshots = bundle.get("snapshots", {}) or {}
-        snapshots[0] = enrich_snapshot_rows_with_airport_metadata([dict(row) for row in live_results[:history_top_n]], airport_lookup)
-        bundle["snapshots"] = snapshots
-
-    return bundle
+    return cache[key]
 
 def apply_history_mode_results(history_enabled, hour_offset, live_results):
     """Return live rows while 24h is off; return the exact hourly Top 15 while on."""
@@ -2842,7 +2709,7 @@ def apply_history_mode_results(history_enabled, hour_offset, live_results):
             active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, HISTORY_TOP_N, live_results=live_results
         )
     else:
-        with st.spinner("Loading/precomputing hourly Top 15 crosswind history..."):
+        with st.spinner("Loading hourly Top 15 crosswind history..."):
             bundle = get_or_build_history_snapshot_bundle(
                 active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, HISTORY_TOP_N, live_results=live_results
             )
@@ -2855,20 +2722,15 @@ def apply_history_mode_results(history_enabled, hour_offset, live_results):
 
 
 if layout_mode == "Wide":
-    left, right = st.columns([2, 1])
+    results, history_bundle = apply_history_mode_results(history_enabled, hour_offset, live_results)
+    results = enrich_snapshot_rows_with_airport_metadata(results, airport_lookup)
+    display_top_n = HISTORY_TOP_N if history_enabled else LIVE_TOP_N_DEFAULT
 
-    with left:
-        results, history_bundle = apply_history_mode_results(history_enabled, hour_offset, live_results)
-        results = enrich_snapshot_rows_with_airport_metadata(results, airport_lookup)
-        display_top_n = HISTORY_TOP_N if history_enabled else LIVE_TOP_N_DEFAULT
+    with main_left_col:
         if history_enabled:
-            cached_count = len(history_bundle.get("candidate_icaos", [])) if history_bundle else 0
-            cache_source = history_bundle.get("cache_source", "memory") if history_bundle else "memory"
-            cache_label = "precomputed" if cache_source == "disk_precomputed" else "fresh" if cache_source == "fresh_fetch" else "memory"
             st.caption(
                 f"Historical ranking: {history_offset_label(hour_offset, timezone_name)} "
-                f"• showing {len(results[:display_top_n])} of this hour's Top {HISTORY_TOP_N} "
-                f"• cache: {cache_label}"
+                f"• showing {len(results[:display_top_n])} of this hour's Top {HISTORY_TOP_N}"
             )
 
         if st.session_state.selected_icao and not any(
@@ -2887,8 +2749,10 @@ if layout_mode == "Wide":
                 side_by_side_charts=side_by_side_charts,
             )
 
-    with right:
+    with map_slot.container():
         render_map(results[:display_top_n], height=map_height)
+
+    with search_slot.container():
         render_responsive_search()
 
 else:
@@ -2896,7 +2760,6 @@ else:
     results = enrich_snapshot_rows_with_airport_metadata(results, airport_lookup)
     display_top_n = HISTORY_TOP_N if history_enabled else LIVE_TOP_N_DEFAULT
     if history_enabled:
-        cached_count = len(history_bundle.get("candidate_icaos", [])) if history_bundle else 0
         st.caption(
             f"Historical ranking: {history_offset_label(hour_offset, timezone_name)} "
             f"• showing {len(results[:display_top_n])} of this hour's Top {HISTORY_TOP_N}"
