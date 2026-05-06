@@ -1294,19 +1294,24 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
         except Exception:
             return hour_offset
         try:
-            committed_seq = int(selected.get("seq", 0))
+            committed_ts = int(selected.get("ts", 0))
         except Exception:
-            committed_seq = 0
+            committed_ts = 0
 
-        seq_key = f"xwind_timeline_last_seq_{key_prefix}"
-        last_seq = int(st.session_state.get(seq_key, -1))
+        ts_key = f"xwind_timeline_last_ts_{key_prefix}"
+        last_ts = int(st.session_state.get(ts_key, -1))
         current_hour = int(st.session_state.get("history_hour_offset", hour_offset))
-        # Ignore exact duplicate payloads, but always accept a different hour.
-        # Some browsers recreate the component and restart seq at 1, so seq alone
-        # cannot be used to reject a valid new hour.
-        if committed_seq <= last_seq and committed_hour == current_hour:
+
+        # Streamlit components keep returning their last value on reruns.
+        # Only accept a slider event if its timestamp is newer than the last
+        # event Python already processed. This prevents old/previous scroll
+        # selections from overwriting the final snapped hour.
+        if committed_ts and committed_ts <= last_ts:
             return current_hour
-        st.session_state[seq_key] = max(last_seq, committed_seq)
+
+        if committed_ts:
+            st.session_state[ts_key] = committed_ts
+
         st.session_state.history_hour_offset = committed_hour
         st.session_state.history_slider_pos = 23 - committed_hour
         return committed_hour
@@ -1358,19 +1363,6 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
                 margin-left: auto;
                 padding-top: 0.02rem;
             }
-            .history-native-hour-wrap {
-                margin-top: 0.10rem;
-                padding: 0.45rem 0.65rem 0.20rem 0.65rem;
-                border: 1px solid rgba(18,214,203,.32);
-                border-radius: 14px;
-                background: linear-gradient(135deg, rgba(18,214,203,.09), rgba(255,255,255,.025));
-            }
-            .history-native-hour-wrap label,
-            .history-native-hour-wrap [data-testid="stWidgetLabel"] p {
-                font-size: 0.74rem !important;
-                font-weight: 900 !important;
-                color: #dffffd !important;
-            }
             .global-under-title { margin-top:-2px; margin-bottom:2px; }
             .global-under-title div[data-testid="stCheckbox"] label {
                 font-size: 0.76rem !important;
@@ -1410,16 +1402,13 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
         )
         st.markdown("</div>", unsafe_allow_html=True)
 
-        st.markdown("<div class='history-native-hour-wrap'>", unsafe_allow_html=True)
-        selected_hour = st.select_slider(
-            "History hour",
-            options=list(range(24)),
-            value=hour_offset,
-            format_func=lambda h: "NOW" if int(h) == 0 else f"{int(h)}h ago",
-            key="history_hour_selector_phone",
-            disabled=not history_enabled,
+        selected_hour = render_history_timeline_scrubber(
+            hour_offset,
+            timezone_name=timezone_name,
+            phone=phone,
+            key_prefix="phone",
+            active=history_enabled,
         )
-        st.markdown("</div>", unsafe_allow_html=True)
     else:
         left_col, slider_col = st.columns([0.34, 0.66], gap="small")
         with left_col:
@@ -1444,14 +1433,13 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
             st.markdown("</div></div>", unsafe_allow_html=True)
 
         with slider_col:
-            st.markdown("<div class='history-slider-compact-wrap history-native-hour-wrap'>", unsafe_allow_html=True)
-            selected_hour = st.select_slider(
-                "History hour",
-                options=list(range(24)),
-                value=hour_offset,
-                format_func=lambda h: "NOW" if int(h) == 0 else f"{int(h)}h ago",
-                key="history_hour_selector_wide",
-                disabled=not history_enabled,
+            st.markdown("<div class='history-slider-compact-wrap'>", unsafe_allow_html=True)
+            selected_hour = render_history_timeline_scrubber(
+                hour_offset,
+                timezone_name=timezone_name,
+                phone=phone,
+                key_prefix="wide",
+                active=history_enabled,
             )
             st.markdown("</div>", unsafe_allow_html=True)
 
