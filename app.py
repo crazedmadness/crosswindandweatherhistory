@@ -1024,7 +1024,7 @@ def render_history_time_badge(hour_offset, timezone_name="America/Los_Angeles"):
 
 def ensure_xwind_timeline_component():
     # Create a tiny local Streamlit component for the custom timeline.
-    component_dir = Path(__file__).parent / "_xwind_timeline_component"
+    component_dir = Path(__file__).parent / "_xwind_timeline_component_return_v3"
     component_dir.mkdir(exist_ok=True)
     index_file = component_dir / "index.html"
 
@@ -1086,8 +1086,10 @@ def ensure_xwind_timeline_component():
     </div>
 <script>
 let labels=[], selectedOffset=0, historyActive=false, phone=false, chipW=76;
-let lastCommittedOffset=null, lastRenderOffset=null, commitSeq=0, suppressNextRender=false;
-let commitTimer=null, dragIdxFloat=null;
+let lastRenderOffset=null, commitSeq=0, commitTimer=null, dragIdxFloat=null;
+let componentInstanceId = "xwind_" + Math.random().toString(36).slice(2) + "_" + Date.now().toString(36);
+let renderNonce = "initial";
+let pendingCommitUntil = 0;
 const rail=document.getElementById("rail"), viewport=document.getElementById("viewport"), agePill=document.getElementById("agePill"), utcLabel=document.getElementById("utcLabel"), localLabel=document.getElementById("localLabel"), insideToggle=document.getElementById("insideToggle"), shell=document.getElementById("shell");
 function send(type,data){ window.parent.postMessage(Object.assign({isStreamlitMessage:true,type:type},data),"*"); }
 function setFrameHeight(height){ send("streamlit:setFrameHeight",{height:height}); }
@@ -1133,11 +1135,21 @@ function commitSelected(action="commit", explicitHour=null){
     const snapped=clampHour(explicitHour===null ? selectedOffset : explicitHour);
     selectedOffset=snapped;
     centerSelected(true);
-    if(Number(snapped)===Number(lastCommittedOffset))return;
     commitSeq += 1;
-    lastCommittedOffset=snapped;
+    const ts = Date.now();
+    const eventId = `${componentInstanceId}_${commitSeq}_${snapped}_${ts}`;
+    pendingCommitUntil = ts + 1200;
     try{ window.parent.sessionStorage.setItem("xwind_scroll_y",String(window.parent.scrollY||0)); }catch(err){}
-    setComponentValue({hour:snapped, committed:true, seq:commitSeq, action:action, ts:Date.now()});
+    setComponentValue({
+        hour:snapped,
+        committed:true,
+        event_id:eventId,
+        seq:commitSeq,
+        action:action,
+        ts:ts,
+        render_nonce:renderNonce,
+        instance_id:componentInstanceId
+    });
 }
 function scheduleCommit(action="commit", explicitHour=null){
     if(commitTimer)window.clearTimeout(commitTimer);
@@ -1226,11 +1238,15 @@ window.addEventListener("message",event=>{
     historyActive=!!args.active;
     phone=!!args.phone;
     chipW=phone?62:76;
+    renderNonce=String(args.render_nonce || "none");
     const incoming=clampHour(args.selected_offset||0);
-    // Treat Python's selected_offset as the source of truth after a rerun.
-    selectedOffset=incoming;
+    // Python is source of truth, but do not immediately yank the rail back
+    // during the tiny window after a user commit is sent and before Streamlit
+    // applies that value. This prevents visible snap-back and stale replays.
+    if(Date.now() > pendingCommitUntil){
+        selectedOffset=incoming;
+    }
     lastRenderOffset=incoming;
-    lastCommittedOffset=incoming;
     rebuildChips();
     centerSelected(false);
     setFrameHeight(Number(args.height||(phone?104:118)));
@@ -1240,7 +1256,7 @@ componentReady(); setFrameHeight(118);
 </body>
 </html>'''
     index_file.write_text(component_html, encoding="utf-8")
-    return components.declare_component("xwind_history_timeline", path=str(component_dir))
+    return components.declare_component("xwind_history_timeline_return_v3", path=str(component_dir))
 
 
 @st.cache_resource
@@ -1272,8 +1288,9 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
         active=bool(active),
         phone=bool(phone),
         height=height,
+        render_nonce=f"{key_prefix}_{int(pd.Timestamp.now(tz='UTC').timestamp() * 1000)}_{hour_offset}_{int(bool(active))}",
         key=f"xwind_timeline_{key_prefix}",
-        default={"hour": hour_offset, "committed": False, "seq": 0, "action": "default"},
+        default={"hour": hour_offset, "committed": False, "event_id": "default", "seq": 0, "action": "default"},
     )
 
     # Robust return handling:
@@ -1293,24 +1310,20 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
             committed_hour = max(0, min(23, int(selected.get("hour", hour_offset))))
         except Exception:
             return hour_offset
-        try:
-            committed_ts = int(selected.get("ts", 0))
-        except Exception:
-            committed_ts = 0
-
-        ts_key = f"xwind_timeline_last_ts_{key_prefix}"
-        last_ts = int(st.session_state.get(ts_key, -1))
+        event_id = str(selected.get("event_id", ""))
         current_hour = int(st.session_state.get("history_hour_offset", hour_offset))
 
-        # Streamlit components keep returning their last value on reruns.
-        # Only accept a slider event if its timestamp is newer than the last
-        # event Python already processed. This prevents old/previous scroll
-        # selections from overwriting the final snapped hour.
-        if committed_ts and committed_ts <= last_ts:
+        # Streamlit components return their last value again on every rerun.
+        # A unique event_id lets Python accept each real user commit exactly once
+        # and ignore replayed stale commits from earlier clicks/drags.
+        seen_key = f"xwind_timeline_seen_events_{key_prefix}"
+        seen_events = st.session_state.get(seen_key, [])
+        if event_id and event_id in seen_events:
             return current_hour
 
-        if committed_ts:
-            st.session_state[ts_key] = committed_ts
+        if event_id:
+            seen_events = (seen_events + [event_id])[-20:]
+            st.session_state[seen_key] = seen_events
 
         st.session_state.history_hour_offset = committed_hour
         st.session_state.history_slider_pos = 23 - committed_hour
