@@ -785,7 +785,7 @@ def get_metar_histories_bulk(icaos_tuple, hours=24):
 
     # Historical responses are bigger than current METAR responses.
     # Small batches are much more reliable on Streamlit Cloud.
-    history_batch_size = 20
+    history_batch_size = 75
 
     for batch in chunks(icaos, history_batch_size):
         url = f"https://aviationweather.gov/api/data/metar?ids={','.join(batch)}&format=json&hours={hours}"
@@ -911,25 +911,22 @@ def build_24h_ranked_snapshots(icaos_tuple, runway_ends_by_icao, min_wind, min_l
 
 
 def build_24h_hourly_top_union_bundle(icaos_tuple, runway_ends_by_icao, min_wind, min_len, top_n=15):
-    """Build the exact history-mode model the slider needs.
+    """Build fast hourly Top-N snapshots for the history slider.
 
-    Logic:
-    1. For each of the last 24 hourly targets, calculate the Top N airports
-       from the full active airport set (US or global, depending on the toggle).
-    2. Union those hourly Top N airport ICAOs into one candidate pool.
-    3. Using that candidate pool's already-fetched 24h METAR histories, rebuild
-       hourly snapshots so selecting any hour returns that hour's Top N airports.
+    Fast model:
+    1. Fetch 24h METAR histories once for the full active airport set.
+    2. For each target hour, calculate each airport's best runway crosswind.
+    3. Store only that hour's Top N rows.
+    4. Keep the union of all hourly Top N ICAOs only as cache/debug metadata.
 
-    This means the slider is not stuck with only the current Top N airports, and
-    it also is not using one single "peak across 24h" list. Each selected hour
-    gets its own Top N ranking, while the cache contains the union of all hourly
-    winners.
+    Slider movement never rebuilds this. It only selects:
+        snapshots[selected_hour]
     """
     icaos = tuple(sorted(str(x).upper().strip() for x in icaos_tuple if str(x).strip()))
     histories = get_metar_histories_bulk(icaos, hours=25)
     now_utc = pd.Timestamp.now(tz="UTC").floor("h")
 
-    hourly_full_rankings = {}
+    snapshots = {}
     hourly_top_icaos = {}
     union_icaos = set()
 
@@ -942,37 +939,24 @@ def build_24h_hourly_top_union_bundle(icaos_tuple, runway_ends_by_icao, min_wind
             if not m:
                 continue
 
-            result = result_from_metar_snapshot(icao, m, runway_ends_by_icao, min_wind, min_len)
+            result = result_from_metar_snapshot(
+                icao,
+                m,
+                runway_ends_by_icao,
+                min_wind,
+                min_len,
+            )
             if result:
                 result["history_hour_offset"] = hour_offset
                 result["snapshot_target_utc"] = target_time
                 rows.append(result)
 
-        ranked = sorted(rows, key=lambda x: x["cw"], reverse=True)
-        top_rows = ranked[:top_n]
-        hourly_full_rankings[hour_offset] = ranked
+        top_rows = sorted(rows, key=lambda x: x["cw"], reverse=True)[:top_n]
+        snapshots[hour_offset] = top_rows
         hourly_top_icaos[hour_offset] = [row["icao"] for row in top_rows]
         union_icaos.update(row["icao"] for row in top_rows)
 
     candidate_icaos = tuple(sorted(union_icaos))
-    snapshots = {}
-
-    for hour_offset in range(24):
-        target_time = now_utc - pd.Timedelta(hours=hour_offset)
-        rows = []
-
-        for icao in candidate_icaos:
-            m = pick_observation_for_target(histories.get(icao, []), target_time)
-            if not m:
-                continue
-
-            result = result_from_metar_snapshot(icao, m, runway_ends_by_icao, min_wind, min_len)
-            if result:
-                result["history_hour_offset"] = hour_offset
-                result["snapshot_target_utc"] = target_time
-                rows.append(result)
-
-        snapshots[hour_offset] = sorted(rows, key=lambda x: x["cw"], reverse=True)[:top_n]
 
     return {
         "snapshots": snapshots,
@@ -1286,14 +1270,10 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
 
 
 def render_history_slider_controls(title_text, phone=False, show_title=True):
-    # Always-visible timeline scrubber with Streamlit-owned history on/off.
-    # Desktop/tablet layout: title + 24h checkbox on the left, compact fancy
-    # timeline on the right. Phone stays stacked so it does not get cramped.
+    # Top control strip: title + history toggle + global toggle on the left,
+    # compact fancy timeline on the right. This lives close to the banner/options.
     timezone_name = get_viewer_timezone()
     try:
-        # Only restore the selected hour from the URL. history_mode is owned by
-        # the Streamlit checkbox below and must not be overwritten by stale
-        # query params during component callback reruns.
         qp_hour = st.query_params.get("history_hour", None)
         if isinstance(qp_hour, list):
             qp_hour = qp_hour[0] if qp_hour else None
@@ -1306,15 +1286,45 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
     st.markdown("""
         <style>
             :root { --xwind-teal:#12d6cb; --xwind-teal-soft:rgba(18,214,203,0.18); --xwind-teal-mid:rgba(18,214,203,0.42); }
-            .xwind-list-title { font-size: 1.28rem; line-height: 1.05; font-weight: 900; margin: 0rem 0 0.05rem 0; }
-            .xwind-title-toggle-box { padding-top: 0.15rem; }
-            .history-streamlit-toggle { margin-top: -3px; margin-bottom: 2px; }
-            .history-streamlit-toggle label { font-size: 0.74rem !important; font-weight: 900 !important; color: #dffffd !important; white-space: nowrap !important; }
-            .history-streamlit-toggle [data-testid="stWidgetLabel"] p { font-size: 0.74rem !important; font-weight: 900 !important; }
-            .history-slider-compact-wrap { max-width: 620px; margin-left: auto; }
+            .xwind-top-history-strip {
+                margin-top: -0.45rem;
+                margin-bottom: 0.18rem;
+            }
+            .xwind-list-title {
+                font-size: 1.28rem;
+                line-height: 1.05;
+                font-weight: 900;
+                margin: 0rem 0 0.05rem 0;
+            }
+            .xwind-title-toggle-box { padding-top: 0.05rem; }
+            .history-streamlit-toggle { margin-top: -4px; margin-bottom: -5px; }
+            .history-streamlit-toggle label,
+            .history-streamlit-toggle [data-testid="stWidgetLabel"] p {
+                font-size: 0.74rem !important;
+                font-weight: 900 !important;
+                color: #dffffd !important;
+                white-space: nowrap !important;
+            }
+            .global-under-history { margin-top: -7px; margin-bottom: 0px; }
+            .global-under-history label,
+            .global-under-history [data-testid="stWidgetLabel"] p {
+                font-size: 0.72rem !important;
+                font-weight: 850 !important;
+                white-space: nowrap !important;
+            }
+            .history-slider-compact-wrap {
+                max-width: 560px;
+                margin-left: auto;
+                padding-top: 0.02rem;
+            }
             .global-under-title { margin-top:-2px; margin-bottom:2px; }
-            .global-under-title div[data-testid="stCheckbox"] label { font-size: 0.76rem !important; font-weight: 850 !important; white-space: nowrap !important; }
+            .global-under-title div[data-testid="stCheckbox"] label {
+                font-size: 0.76rem !important;
+                font-weight: 850 !important;
+                white-space: nowrap !important;
+            }
             @media (max-width: 760px) {
+                .xwind-top-history-strip { margin-top: -0.25rem; }
                 .xwind-list-title { font-size: 1rem; padding-top:0px; }
                 .history-slider-compact-wrap { max-width: 100%; margin-left: 0; }
             }
@@ -1324,9 +1334,12 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
     hour_offset = int(st.session_state.get("history_hour_offset", 0))
     hour_offset = max(0, min(23, hour_offset))
 
+    st.markdown("<div class='xwind-top-history-strip'>", unsafe_allow_html=True)
+
     if phone:
         if show_title:
             st.markdown(f"<div id='xwind-history-anchor' class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
+
         st.markdown("<div class='history-streamlit-toggle'>", unsafe_allow_html=True)
         history_enabled = st.checkbox(
             "24h history slider",
@@ -1334,6 +1347,15 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
             help="Build/cache each hour's Top 15, then use the scrubber below to move between hours.",
         )
         st.markdown("</div>", unsafe_allow_html=True)
+
+        st.markdown("<div class='global-under-history'>", unsafe_allow_html=True)
+        use_global_value = st.checkbox(
+            "Global airports",
+            key="use_global",
+            help="Off = US only. On = all matching global airports.",
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+
         selected_hour = render_history_timeline_scrubber(
             hour_offset,
             timezone_name=timezone_name,
@@ -1347,13 +1369,23 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
             st.markdown("<div class='xwind-title-toggle-box'>", unsafe_allow_html=True)
             if show_title:
                 st.markdown(f"<div id='xwind-history-anchor' class='xwind-list-title'>{html.escape(title_text)}</div>", unsafe_allow_html=True)
+
             st.markdown("<div class='history-streamlit-toggle'>", unsafe_allow_html=True)
             history_enabled = st.checkbox(
                 "24h history slider",
                 key="history_mode",
                 help="Build/cache each hour's Top 15, then use the scrubber to move between hours.",
             )
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            st.markdown("<div class='global-under-history'>", unsafe_allow_html=True)
+            use_global_value = st.checkbox(
+                "Global airports",
+                key="use_global",
+                help="Off = US only. On = all matching global airports.",
+            )
             st.markdown("</div></div>", unsafe_allow_html=True)
+
         with slider_col:
             st.markdown("<div class='history-slider-compact-wrap'>", unsafe_allow_html=True)
             selected_hour = render_history_timeline_scrubber(
@@ -1365,16 +1397,18 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
             )
             st.markdown("</div>", unsafe_allow_html=True)
 
+    st.markdown("</div>", unsafe_allow_html=True)
+
     if history_enabled:
         hour_offset = max(0, min(23, int(selected_hour)))
     else:
         hour_offset = 0
+
     st.session_state.history_hour_offset = hour_offset
     st.session_state.history_slider_pos = 23 - hour_offset
-    # Do not mutate st.query_params here. The custom component now uses a real
-    # Streamlit callback, so URL writes are unnecessary and can trigger extra
-    # reruns that desync the checkbox state.
-    return history_enabled, hour_offset
+    st.session_state.use_global = bool(use_global_value)
+
+    return history_enabled, hour_offset, bool(use_global_value)
 
 def build_history_table(icao, runway_ends_by_icao, min_len, hours=24, timezone_name="America/Los_Angeles"):
     history = get_metar_history(icao, hours=hours)
@@ -2188,7 +2222,7 @@ if "global_toggle_top" not in st.session_state:
 
 
 # Bump this when the cached time-slider row shape changes.
-HISTORY_SNAPSHOT_CACHE_VERSION = "2026-05-06-hourly-union-top15-layout-v7"
+HISTORY_SNAPSHOT_CACHE_VERSION = "2026-05-06-fast-hourly-top15-topbar-v8"
 
 if st.session_state.get("history_snapshot_cache_version") != HISTORY_SNAPSHOT_CACHE_VERSION:
     for _key in [
@@ -2386,6 +2420,12 @@ st.session_state.top_n = top_n
 st.session_state.layout_mode = layout_mode
 st.session_state.use_global = use_global
 
+# Put the history/global controls directly under the banner/options row.
+# The global checkbox here owns the active airport set.
+_history_title_for_topbar = "Global Crosswinds" if st.session_state.use_global else "US Crosswinds"
+history_enabled, hour_offset, use_global = render_history_slider_controls(_history_title_for_topbar, phone=is_phone)
+st.session_state.use_global = use_global
+
 # Responsive behavior based on viewport width.
 # Phone and narrow tablet load stacked. iPad landscape / desktop load wide.
 if is_phone:
@@ -2565,8 +2605,6 @@ if layout_mode == "Wide":
     left, right = st.columns([2, 1])
 
     with left:
-        history_enabled, hour_offset = render_history_slider_controls(list_title, phone=is_phone)
-
         results, history_bundle = apply_history_mode_results(history_enabled, hour_offset, live_results)
         results = enrich_snapshot_rows_with_airport_metadata(results, airport_lookup)
         display_top_n = HISTORY_TOP_N if history_enabled else LIVE_TOP_N_DEFAULT
@@ -2601,8 +2639,6 @@ if layout_mode == "Wide":
 
 else:
     st.subheader("Map")
-
-    history_enabled, hour_offset = render_history_slider_controls(list_title, phone=is_phone)
 
     results, history_bundle = apply_history_mode_results(history_enabled, hour_offset, live_results)
     results = enrich_snapshot_rows_with_airport_metadata(results, airport_lookup)
