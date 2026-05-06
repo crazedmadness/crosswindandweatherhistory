@@ -871,7 +871,7 @@ def build_24h_ranked_snapshots(icaos_tuple, runway_ends_by_icao, min_wind, min_l
     """Build 24 hourly ranked snapshots from the supplied airport list.
 
     This is still used as a small helper, but history mode now uses
-    build_24h_hourly_top_union_bundle() so the displayed candidate pool is the
+    build_24h_hourly_top15_bundle() so the displayed candidate pool is the
     union of every hour's Top 15.
     """
     icaos = tuple(sorted(str(x).upper().strip() for x in icaos_tuple if str(x).strip()))
@@ -899,33 +899,37 @@ def build_24h_ranked_snapshots(icaos_tuple, runway_ends_by_icao, min_wind, min_l
     return snapshots
 
 
-def build_24h_hourly_top_union_bundle(icaos_tuple, runway_ends_by_icao, min_wind, min_len, top_n=15):
-    """Build exact hourly Top-N snapshots for the history slider.
+def build_24h_hourly_top15_bundle(icaos_tuple, runway_ends_by_icao, min_len, top_n=15, live_results=None):
+    """Build a simple dict of exact hourly Top-N crosswind snapshots.
 
-    This version buckets METARs by their actual observation hour instead of
-    using overlapping target windows. That prevents one strong METAR from being
-    reused across several neighboring slider hours.
-
-    Slider semantics:
-        0  = current UTC hour bucket
-        1  = previous UTC hour bucket
+    This is the intended history-slider data model:
+        snapshots[0]  = Top N current/live airports, matching normal mode
+        snapshots[1]  = Top N airports from the previous UTC hour bucket
         ...
-        23 = 23 hours ago
+        snapshots[23] = Top N airports from 23 hours ago
 
-    For every airport/hour bucket, the latest METAR inside that exact UTC hour
-    is used. Then each hour is independently ranked and trimmed to Top N.
+    Each snapshot row contains the weather/runway/crosswind data for that
+    specific hour. There is no union pool, no candidate reuse, and no
+    fallback to neighboring hours.
     """
     icaos = tuple(sorted(str(x).upper().strip() for x in icaos_tuple if str(x).strip()))
     histories = get_metar_histories_bulk(icaos, hours=25)
     base_hour_utc = pd.Timestamp.now(tz="UTC").floor("h")
 
-    # hour_rows[offset] -> list of crosswind result rows for that exact hour bucket
-    hour_rows = {h: [] for h in range(24)}
+    snapshots = {h: [] for h in range(24)}
+
+    # Hour 0 must match live mode exactly, only limited to Top N.
+    if live_results is not None:
+        snapshots[0] = [dict(row) for row in live_results[:top_n]]
+
+    # Build exact UTC-hour buckets for hours 1-23.
+    # For every airport in every hour, use the latest METAR inside that exact
+    # hour bucket, then rank all airports for that hour and keep Top N.
+    raw_hour_rows = {h: [] for h in range(1, 24)}
 
     for icao in icaos:
-        obs_by_hour = {}
+        latest_obs_by_hour = {}
 
-        # Choose one METAR per exact UTC hour bucket: latest obs in that bucket.
         for m in histories.get(icao, []):
             obs_time = get_metar_observation_time(m)
             if pd.isna(obs_time):
@@ -933,57 +937,51 @@ def build_24h_hourly_top_union_bundle(icaos_tuple, runway_ends_by_icao, min_wind
 
             obs_time = pd.Timestamp(obs_time).tz_convert("UTC")
             obs_hour = obs_time.floor("h")
-            hour_offset_float = (base_hour_utc - obs_hour) / pd.Timedelta(hours=1)
+            hour_offset = int((base_hour_utc - obs_hour) / pd.Timedelta(hours=1))
 
-            try:
-                hour_offset = int(hour_offset_float)
-            except Exception:
+            if hour_offset < 1 or hour_offset > 23:
                 continue
 
-            if hour_offset < 0 or hour_offset > 23:
-                continue
-
-            previous = obs_by_hour.get(hour_offset)
+            previous = latest_obs_by_hour.get(hour_offset)
             if previous is None or obs_time > previous[0]:
-                obs_by_hour[hour_offset] = (obs_time, m)
+                latest_obs_by_hour[hour_offset] = (obs_time, m)
 
-        for hour_offset, (obs_time, m) in obs_by_hour.items():
-            # History mode should rank the true highest crosswinds for that hour.
-            # Do not apply live min-wind filtering here.
+        for hour_offset, (obs_time, m) in latest_obs_by_hour.items():
             result = result_from_metar_snapshot(
                 icao,
                 m,
                 runway_ends_by_icao,
-                0,
+                0,          # history mode ranks true crosswind; no live min-wind filter
                 min_len,
             )
             if result:
                 result["history_hour_offset"] = hour_offset
                 result["snapshot_target_utc"] = base_hour_utc - pd.Timedelta(hours=hour_offset)
                 result["obs_hour_utc"] = obs_time.floor("h")
-                hour_rows[hour_offset].append(result)
+                raw_hour_rows[hour_offset].append(result)
 
-    snapshots = {}
-    hourly_top_icaos = {}
-    union_icaos = set()
-
-    for hour_offset in range(24):
-        top_rows = sorted(hour_rows.get(hour_offset, []), key=lambda x: x["cw"], reverse=True)[:top_n]
-        snapshots[hour_offset] = top_rows
-        hourly_top_icaos[hour_offset] = [row["icao"] for row in top_rows]
-        union_icaos.update(row["icao"] for row in top_rows)
-
-    candidate_icaos = tuple(sorted(union_icaos))
+    for hour_offset in range(1, 24):
+        snapshots[hour_offset] = sorted(
+            raw_hour_rows.get(hour_offset, []),
+            key=lambda x: x.get("cw", -1),
+            reverse=True,
+        )[:top_n]
 
     return {
         "snapshots": snapshots,
-        "candidate_icaos": list(candidate_icaos),
-        "hourly_top_icaos": hourly_top_icaos,
-        "candidate_pool_size": len(candidate_icaos),
+        "candidate_icaos": sorted({
+            row.get("icao")
+            for rows in snapshots.values()
+            for row in rows
+            if row.get("icao")
+        }),
+        "candidate_pool_size": sum(len(rows) for rows in snapshots.values()),
         "active_airport_count": len(icaos),
         "base_hour_utc": base_hour_utc,
         "built_at_utc": pd.Timestamp.now(tz="UTC"),
+        "simple_hourly_top15": True,
     }
+
 
 def history_snapshot_times(hour_offset, timezone_name="America/Los_Angeles"):
     """Return the selected snapshot bucket in UTC and local viewer time."""
@@ -1338,7 +1336,7 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
                 color: #dffffd !important;
                 white-space: nowrap !important;
             }
-            .global-under-history { margin-top: -7px; margin-bottom: 0px; }
+            .global-under-history { margin-top: -10px; margin-bottom: -2px; }
             .global-under-history label,
             .global-under-history [data-testid="stWidgetLabel"] p {
                 font-size: 0.72rem !important;
@@ -2256,7 +2254,7 @@ if "global_toggle_top" not in st.session_state:
 
 
 # Bump this when the cached time-slider row shape changes.
-HISTORY_SNAPSHOT_CACHE_VERSION = "2026-05-06-fast-hourly-top15-topbar-v8"
+HISTORY_SNAPSHOT_CACHE_VERSION = "2026-05-06-simple-hourly-top15-v1"
 
 if st.session_state.get("history_snapshot_cache_version") != HISTORY_SNAPSHOT_CACHE_VERSION:
     for _key in [
@@ -2571,11 +2569,11 @@ def history_cache_key(active_icaos, use_global, min_wind, min_len, history_top_n
 
 
 def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, history_top_n=HISTORY_TOP_N, live_results=None):
-    """Build/cache history mode using the union of each hour's Top 15 airports.
+    """Build/cache the simple 24-list history bundle.
 
-    This intentionally does NOT start from the current live Top 15/30. It scans
-    the full active set (US or global), finds Top 15 for every hour, unions
-    those hourly winners, and then stores Top 15 rows for each selected hour.
+    snapshots[hour_offset] is already the Top 15 list for that exact hour,
+    including the correct METAR/runway/crosswind data for that hour.
+    Slider movement should only select from this dictionary.
     """
     if "history_snapshot_cache" not in st.session_state:
         st.session_state.history_snapshot_cache = {}
@@ -2585,15 +2583,14 @@ def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_b
     st.session_state.history_snapshot_cache = cache
 
     if key not in cache:
-        bundle = build_24h_hourly_top_union_bundle(
+        bundle = build_24h_hourly_top15_bundle(
             active_icaos,
             runway_ends_by_icao,
-            min_wind,
             min_len,
             top_n=history_top_n,
+            live_results=live_results,
         )
 
-        # Make every snapshot row safe for both the list and map.
         snapshots = bundle.get("snapshots", {})
         for hour_offset, rows in list(snapshots.items()):
             snapshots[hour_offset] = enrich_snapshot_rows_with_airport_metadata(rows, airport_lookup)
@@ -2603,9 +2600,8 @@ def get_or_build_history_snapshot_bundle(active_icaos, use_global, runway_ends_b
 
     return cache[key]
 
-
 def apply_history_mode_results(history_enabled, hour_offset, live_results):
-    """Return live rows while 24h is off; return cached hourly rows while on."""
+    """Return live rows while 24h is off; return the exact hourly Top 15 while on."""
     if "history_snapshot_cache" not in st.session_state:
         st.session_state.history_snapshot_cache = {}
 
@@ -2615,23 +2611,15 @@ def apply_history_mode_results(history_enabled, hour_offset, live_results):
         hour_offset = 0
     hour_offset = max(0, min(23, hour_offset))
 
-    live_preview_bundle = {
-        "snapshots": {0: live_results[:HISTORY_TOP_N]},
-        "candidate_icaos": [r.get("icao") for r in live_results[:HISTORY_TOP_N] if r.get("icao")],
-        "candidate_pool_size": len(live_results[:HISTORY_TOP_N]),
-        "built_at_utc": pd.Timestamp.now(tz="UTC"),
-        "live_now_preview": True,
-    }
-
     if not history_enabled:
+        live_preview_bundle = {
+            "snapshots": {0: live_results[:HISTORY_TOP_N]},
+            "candidate_icaos": [r.get("icao") for r in live_results[:HISTORY_TOP_N] if r.get("icao")],
+            "candidate_pool_size": len(live_results[:HISTORY_TOP_N]),
+            "built_at_utc": pd.Timestamp.now(tz="UTC"),
+            "live_now_preview": True,
+        }
         return live_results, live_preview_bundle
-
-    # Critical behavior: history slider at NOW must exactly match normal live
-    # mode, only limited to the history display size. Do not use the 24h
-    # historical METAR endpoint for hour 0, because its newest bucket can lag
-    # or differ from the current METAR endpoint.
-    if hour_offset == 0:
-        return live_results[:HISTORY_TOP_N], live_preview_bundle
 
     key = history_cache_key(active_icaos, use_global, min_wind, min_len, HISTORY_TOP_N)
 
@@ -2640,17 +2628,13 @@ def apply_history_mode_results(history_enabled, hour_offset, live_results):
             active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, HISTORY_TOP_N, live_results=live_results
         )
     else:
-        with st.spinner("Loading Top 15 24-hour airport history..."):
+        with st.spinner("Loading hourly Top 15 crosswind history..."):
             bundle = get_or_build_history_snapshot_bundle(
                 active_icaos, use_global, runway_ends_by_icao, min_wind, min_len, HISTORY_TOP_N, live_results=live_results
             )
 
     snapshots = bundle.get("snapshots", {})
-    # Exact-hour behavior: do not silently fall back to a neighboring hour.
-    # Falling back made the UI look like the slider was stuck on a previous
-    # time. If an hour truly has no usable METAR rows, show that honestly.
     rows = snapshots.get(hour_offset, [])
-
     rows = enrich_snapshot_rows_with_airport_metadata(rows, airport_lookup)
     return rows, bundle
 
@@ -2666,10 +2650,9 @@ if layout_mode == "Wide":
         if history_enabled:
             cached_count = len(history_bundle.get("candidate_icaos", [])) if history_bundle else 0
             st.caption(
-    f"Historical ranking: {history_offset_label(hour_offset, timezone_name)} "
-    f"• cached {cached_count} airports from "
-    f"{history_bundle.get('candidate_pool_size', cached_count) if history_bundle else cached_count} candidates"
-)
+                f"Historical ranking: {history_offset_label(hour_offset, timezone_name)} "
+                f"• showing {len(results[:display_top_n])} of this hour's Top {HISTORY_TOP_N}"
+            )
 
         if st.session_state.selected_icao and not any(
             r["icao"] == st.session_state.selected_icao for r in results[:display_top_n]
@@ -2688,23 +2671,19 @@ if layout_mode == "Wide":
             )
 
     with right:
-        st.subheader("Map")
         render_map(results[:display_top_n], height=map_height)
         render_responsive_search()
 
 else:
-    st.subheader("Map")
-
     results, history_bundle = apply_history_mode_results(history_enabled, hour_offset, live_results)
     results = enrich_snapshot_rows_with_airport_metadata(results, airport_lookup)
     display_top_n = HISTORY_TOP_N if history_enabled else LIVE_TOP_N_DEFAULT
     if history_enabled:
         cached_count = len(history_bundle.get("candidate_icaos", [])) if history_bundle else 0
         st.caption(
-    f"Historical ranking: {history_offset_label(hour_offset, timezone_name)} "
-    f"• cached {cached_count} airports from "
-    f"{history_bundle.get('candidate_pool_size', cached_count) if history_bundle else cached_count} candidates"
-)
+            f"Historical ranking: {history_offset_label(hour_offset, timezone_name)} "
+            f"• showing {len(results[:display_top_n])} of this hour's Top {HISTORY_TOP_N}"
+        )
 
     if st.session_state.selected_icao and not any(
         r["icao"] == st.session_state.selected_icao for r in results[:display_top_n]
