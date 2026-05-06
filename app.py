@@ -1406,8 +1406,9 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
 
     st.session_state.history_hour_offset = hour_offset
     st.session_state.history_slider_pos = 23 - hour_offset
-    st.session_state.use_global = bool(use_global_value)
-
+    # Do not assign st.session_state.use_global here. The checkbox with
+    # key="use_global" owns that session-state entry; assigning to it after
+    # widget creation raises StreamlitAPIException on newer Streamlit/Python.
     return history_enabled, hour_offset, bool(use_global_value)
 
 def build_history_table(icao, runway_ends_by_icao, min_len, hours=24, timezone_name="America/Los_Angeles"):
