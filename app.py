@@ -900,20 +900,20 @@ def build_24h_ranked_snapshots(icaos_tuple, runway_ends_by_icao, min_wind, min_l
 
 
 def build_24h_hourly_top15_bundle(icaos_tuple, runway_ends_by_icao, min_len, top_n=15, live_results=None):
-    """Build a simple dict of exact hourly Top-N crosswind snapshots.
+    """Build the simple 24-list history model used by the hour selector.
 
-    This is the intended history-slider data model:
-        snapshots[0]  = Top N current/live airports, matching normal mode
-        snapshots[1]  = Top N airports from the previous UTC hour bucket
-        ...
-        snapshots[23] = Top N airports from 23 hours ago
+    snapshots[0] is the live/current Top N, matching unchecked mode.
+    snapshots[1]..snapshots[23] are independent Top N rankings for each
+    previous hour.
 
-    Each snapshot row contains the weather/runway/crosswind data for that
-    specific hour. There is no union pool, no candidate reuse, and no
-    fallback to neighboring hours.
+    Important: historical METARs are not always issued exactly on the hour
+    (many arrive at :53, :55, etc.). Instead of exact-hour buckets, each METAR
+    is assigned to the *nearest* hourly target within a non-overlapping 45
+    minute tolerance. That keeps old hours populated without allowing one
+    observation to be reused across several slider positions.
     """
     icaos = tuple(sorted(str(x).upper().strip() for x in icaos_tuple if str(x).strip()))
-    histories = get_metar_histories_bulk(icaos, hours=25)
+    histories = get_metar_histories_bulk(icaos, hours=26)
     base_hour_utc = pd.Timestamp.now(tz="UTC").floor("h")
 
     snapshots = {h: [] for h in range(24)}
@@ -922,13 +922,11 @@ def build_24h_hourly_top15_bundle(icaos_tuple, runway_ends_by_icao, min_len, top
     if live_results is not None:
         snapshots[0] = [dict(row) for row in live_results[:top_n]]
 
-    # Build exact UTC-hour buckets for hours 1-23.
-    # For every airport in every hour, use the latest METAR inside that exact
-    # hour bucket, then rank all airports for that hour and keep Top N.
     raw_hour_rows = {h: [] for h in range(1, 24)}
+    max_nearest_minutes = 45
 
     for icao in icaos:
-        latest_obs_by_hour = {}
+        best_obs_by_hour = {}
 
         for m in histories.get(icao, []):
             obs_time = get_metar_observation_time(m)
@@ -936,17 +934,27 @@ def build_24h_hourly_top15_bundle(icaos_tuple, runway_ends_by_icao, min_len, top
                 continue
 
             obs_time = pd.Timestamp(obs_time).tz_convert("UTC")
-            obs_hour = obs_time.floor("h")
-            hour_offset = int((base_hour_utc - obs_hour) / pd.Timedelta(hours=1))
+            delta_hours = (base_hour_utc - obs_time) / pd.Timedelta(hours=1)
 
-            if hour_offset < 1 or hour_offset > 23:
+            # Assign this METAR to the nearest slider hour. Examples:
+            #   target hour 12Z can use 11:53Z or 12:04Z
+            #   but one METAR cannot fill multiple hours.
+            nearest_hour_offset = int(round(float(delta_hours)))
+            if nearest_hour_offset < 1 or nearest_hour_offset > 23:
                 continue
 
-            previous = latest_obs_by_hour.get(hour_offset)
-            if previous is None or obs_time > previous[0]:
-                latest_obs_by_hour[hour_offset] = (obs_time, m)
+            target_time = base_hour_utc - pd.Timedelta(hours=nearest_hour_offset)
+            minutes_from_target = abs((obs_time - target_time) / pd.Timedelta(minutes=1))
+            if minutes_from_target > max_nearest_minutes:
+                continue
 
-        for hour_offset, (obs_time, m) in latest_obs_by_hour.items():
+            previous = best_obs_by_hour.get(nearest_hour_offset)
+            if previous is None or minutes_from_target < previous[0] or (
+                minutes_from_target == previous[0] and obs_time > previous[1]
+            ):
+                best_obs_by_hour[nearest_hour_offset] = (minutes_from_target, obs_time, m)
+
+        for hour_offset, (_, obs_time, m) in best_obs_by_hour.items():
             result = result_from_metar_snapshot(
                 icao,
                 m,
@@ -955,9 +963,11 @@ def build_24h_hourly_top15_bundle(icaos_tuple, runway_ends_by_icao, min_len, top
                 min_len,
             )
             if result:
+                target_time = base_hour_utc - pd.Timedelta(hours=hour_offset)
                 result["history_hour_offset"] = hour_offset
-                result["snapshot_target_utc"] = base_hour_utc - pd.Timedelta(hours=hour_offset)
-                result["obs_hour_utc"] = obs_time.floor("h")
+                result["snapshot_target_utc"] = target_time
+                result["obs_nearest_target_utc"] = target_time
+                result["obs_minutes_from_target"] = round(abs((obs_time - target_time) / pd.Timedelta(minutes=1)), 1)
                 raw_hour_rows[hour_offset].append(result)
 
     for hour_offset in range(1, 24):
@@ -980,8 +990,8 @@ def build_24h_hourly_top15_bundle(icaos_tuple, runway_ends_by_icao, min_len, top
         "base_hour_utc": base_hour_utc,
         "built_at_utc": pd.Timestamp.now(tz="UTC"),
         "simple_hourly_top15": True,
+        "nearest_hour_bucket_minutes": max_nearest_minutes,
     }
-
 
 def history_snapshot_times(hour_offset, timezone_name="America/Los_Angeles"):
     """Return the selected snapshot bucket in UTC and local viewer time."""
@@ -1348,6 +1358,19 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
                 margin-left: auto;
                 padding-top: 0.02rem;
             }
+            .history-native-hour-wrap {
+                margin-top: 0.10rem;
+                padding: 0.45rem 0.65rem 0.20rem 0.65rem;
+                border: 1px solid rgba(18,214,203,.32);
+                border-radius: 14px;
+                background: linear-gradient(135deg, rgba(18,214,203,.09), rgba(255,255,255,.025));
+            }
+            .history-native-hour-wrap label,
+            .history-native-hour-wrap [data-testid="stWidgetLabel"] p {
+                font-size: 0.74rem !important;
+                font-weight: 900 !important;
+                color: #dffffd !important;
+            }
             .global-under-title { margin-top:-2px; margin-bottom:2px; }
             .global-under-title div[data-testid="stCheckbox"] label {
                 font-size: 0.76rem !important;
@@ -1387,13 +1410,16 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
         )
         st.markdown("</div>", unsafe_allow_html=True)
 
-        selected_hour = render_history_timeline_scrubber(
-            hour_offset,
-            timezone_name=timezone_name,
-            phone=phone,
-            key_prefix="phone",
-            active=history_enabled,
+        st.markdown("<div class='history-native-hour-wrap'>", unsafe_allow_html=True)
+        selected_hour = st.select_slider(
+            "History hour",
+            options=list(range(24)),
+            value=hour_offset,
+            format_func=lambda h: "NOW" if int(h) == 0 else f"{int(h)}h ago",
+            key="history_hour_selector_phone",
+            disabled=not history_enabled,
         )
+        st.markdown("</div>", unsafe_allow_html=True)
     else:
         left_col, slider_col = st.columns([0.34, 0.66], gap="small")
         with left_col:
@@ -1418,13 +1444,14 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
             st.markdown("</div></div>", unsafe_allow_html=True)
 
         with slider_col:
-            st.markdown("<div class='history-slider-compact-wrap'>", unsafe_allow_html=True)
-            selected_hour = render_history_timeline_scrubber(
-                hour_offset,
-                timezone_name=timezone_name,
-                phone=phone,
-                key_prefix="wide",
-                active=history_enabled,
+            st.markdown("<div class='history-slider-compact-wrap history-native-hour-wrap'>", unsafe_allow_html=True)
+            selected_hour = st.select_slider(
+                "History hour",
+                options=list(range(24)),
+                value=hour_offset,
+                format_func=lambda h: "NOW" if int(h) == 0 else f"{int(h)}h ago",
+                key="history_hour_selector_wide",
+                disabled=not history_enabled,
             )
             st.markdown("</div>", unsafe_allow_html=True)
 
