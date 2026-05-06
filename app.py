@@ -54,20 +54,9 @@ try:
 except Exception:
     pass
 
-# Keep the custom timeline scrubber hour alive across reruns.
-# IMPORTANT: do not restore history_mode from query params here. The real
-# Streamlit checkbox owns that state. Restoring mode from stale URL params is
-# what made the 24h toggle immediately flip back off after component reruns.
-try:
-    qp_history_hour = st.query_params.get("history_hour", None)
-    if isinstance(qp_history_hour, list):
-        qp_history_hour = qp_history_hour[0] if qp_history_hour else None
-    if qp_history_hour is not None:
-        selected_hour = max(0, min(23, int(qp_history_hour)))
-        st.session_state.history_hour_offset = selected_hour
-        st.session_state.history_slider_pos = 23 - selected_hour
-except Exception:
-    pass
+# The fancy timeline now uses a real Streamlit component callback.
+# Do NOT restore history_hour/history_mode from URL query params here; stale
+# URL params were causing the slider to jump back to a previous hour.
 
 
 def render_raw_html(markup, height=96):
@@ -939,11 +928,15 @@ def build_24h_hourly_top_union_bundle(icaos_tuple, runway_ends_by_icao, min_wind
             if not m:
                 continue
 
+            # History mode needs the true Top N crosswind airports for each hour.
+            # Do not apply the live-mode minimum-wind filter here, otherwise some
+            # hours can return fewer than 15 airports even though lower-wind
+            # crosswind rows exist.
             result = result_from_metar_snapshot(
                 icao,
                 m,
                 runway_ends_by_icao,
-                min_wind,
+                0,
                 min_len,
             )
             if result:
@@ -1062,6 +1055,7 @@ def ensure_xwind_timeline_component():
 <script>
 let labels=[], selectedOffset=0, historyActive=false, phone=false, chipW=76;
 let lastCommittedOffset=null, lastRenderOffset=null, commitSeq=0, suppressNextRender=false;
+let commitTimer=null, dragIdxFloat=null;
 const rail=document.getElementById("rail"), viewport=document.getElementById("viewport"), agePill=document.getElementById("agePill"), utcLabel=document.getElementById("utcLabel"), localLabel=document.getElementById("localLabel"), insideToggle=document.getElementById("insideToggle"), shell=document.getElementById("shell");
 function send(type,data){ window.parent.postMessage(Object.assign({isStreamlitMessage:true,type:type},data),"*"); }
 function setFrameHeight(height){ send("streamlit:setFrameHeight",{height:height}); }
@@ -1102,9 +1096,9 @@ function centerSelected(animate=true){
     updateLabels();
 }
 function setComponentValue(payload){ send("streamlit:setComponentValue",{value:payload}); }
-function commitSelected(action="commit"){
+function commitSelected(action="commit", explicitHour=null){
     if(!historyActive)return;
-    const snapped=clampHour(selectedOffset);
+    const snapped=clampHour(explicitHour===null ? selectedOffset : explicitHour);
     selectedOffset=snapped;
     centerSelected(true);
     if(Number(snapped)===Number(lastCommittedOffset))return;
@@ -1113,16 +1107,26 @@ function commitSelected(action="commit"){
     try{ window.parent.sessionStorage.setItem("xwind_scroll_y",String(window.parent.scrollY||0)); }catch(err){}
     setComponentValue({hour:snapped, committed:true, seq:commitSeq, action:action, ts:Date.now()});
 }
+function scheduleCommit(action="commit", explicitHour=null){
+    if(commitTimer)window.clearTimeout(commitTimer);
+    // Wait one tick after touch/mouse release so the rail has snapped to the
+    // final chip before Streamlit receives the committed hour.
+    commitTimer=window.setTimeout(()=>commitSelected(action, explicitHour), 90);
+}
 function selectOffset(offset,commit=false,action="select"){
     if(!historyActive)return;
     selectedOffset=clampHour(offset);
     centerSelected(true);
     if(commit){
-        window.setTimeout(()=>commitSelected(action), 0);
+        scheduleCommit(action, selectedOffset);
     }
 }
 let startX=0,startIdx=0,dragging=false,moved=false;
-function clientX(e){ if(e.touches&&e.touches.length)return e.touches[0].clientX; return e.clientX; }
+function clientX(e){
+    if(e.touches&&e.touches.length)return e.touches[0].clientX;
+    if(e.changedTouches&&e.changedTouches.length)return e.changedTouches[0].clientX;
+    return e.clientX;
+}
 function startDrag(e){
     if(!historyActive)return;
     dragging=true;
@@ -1131,6 +1135,7 @@ function startDrag(e){
     startX=clientX(e);
     startIdx=selectedIndexFromOffset(selectedOffset);
     if(startIdx<0)startIdx=labels.length-1;
+    dragIdxFloat=startIdx;
 }
 function moveDrag(e){
     if(!dragging)return;
@@ -1138,6 +1143,7 @@ function moveDrag(e){
     if(Math.abs(dx)>3)moved=true;
     const idxFloat=startIdx-(dx/chipW);
     const idx=Math.max(0,Math.min(labels.length-1,idxFloat));
+    dragIdxFloat=idx;
     const vw=viewport.clientWidth;
     const x=(vw/2)-(idx*chipW)-(chipW/2);
     rail.style.transition="none";
@@ -1146,21 +1152,30 @@ function moveDrag(e){
     updateLabels();
     e.preventDefault();
 }
-function endDrag(){
+function endDrag(e){
     if(!dragging)return;
+    // Recalculate once from the final pointer location. Mobile Safari can fire
+    // touchend with a slightly newer changedTouch than the final touchmove.
+    if(e){
+        const dx=clientX(e)-startX;
+        const idxFloat=startIdx-(dx/chipW);
+        dragIdxFloat=Math.max(0,Math.min(labels.length-1,idxFloat));
+    }
     dragging=false;
     viewport.classList.remove("dragging");
-    selectedOffset=clampHour(selectedOffset);
+    const finalIdx=Math.round(dragIdxFloat===null ? selectedIndexFromOffset(selectedOffset) : dragIdxFloat);
+    selectedOffset=offsetFromIndex(finalIdx);
     centerSelected(true);
-    if(moved)commitSelected("drag");
+    if(moved)scheduleCommit("drag", selectedOffset);
+    dragIdxFloat=null;
 }
 viewport.addEventListener("mousedown",startDrag);
 window.addEventListener("mousemove",moveDrag);
-window.addEventListener("mouseup",endDrag);
+window.addEventListener("mouseup",e=>endDrag(e));
 viewport.addEventListener("touchstart",startDrag,{passive:false});
 viewport.addEventListener("touchmove",moveDrag,{passive:false});
-viewport.addEventListener("touchend",endDrag);
-viewport.addEventListener("touchcancel",endDrag);
+viewport.addEventListener("touchend",e=>endDrag(e));
+viewport.addEventListener("touchcancel",e=>endDrag(e));
 window.addEventListener("blur",()=>{if(dragging)endDrag();});
 viewport.addEventListener("wheel",e=>{
     e.preventDefault();
@@ -1253,9 +1268,13 @@ def render_history_timeline_scrubber(hour_offset, timezone_name="America/Los_Ang
 
         seq_key = f"xwind_timeline_last_seq_{key_prefix}"
         last_seq = int(st.session_state.get(seq_key, -1))
-        if committed_seq <= last_seq and committed_hour == int(st.session_state.get("history_hour_offset", hour_offset)):
-            return int(st.session_state.get("history_hour_offset", hour_offset))
-        st.session_state[seq_key] = committed_seq
+        current_hour = int(st.session_state.get("history_hour_offset", hour_offset))
+        # Ignore exact duplicate payloads, but always accept a different hour.
+        # Some browsers recreate the component and restart seq at 1, so seq alone
+        # cannot be used to reject a valid new hour.
+        if committed_seq <= last_seq and committed_hour == current_hour:
+            return current_hour
+        st.session_state[seq_key] = max(last_seq, committed_seq)
         st.session_state.history_hour_offset = committed_hour
         st.session_state.history_slider_pos = 23 - committed_hour
         return committed_hour
@@ -1273,16 +1292,6 @@ def render_history_slider_controls(title_text, phone=False, show_title=True):
     # Top control strip: title + history toggle + global toggle on the left,
     # compact fancy timeline on the right. This lives close to the banner/options.
     timezone_name = get_viewer_timezone()
-    try:
-        qp_hour = st.query_params.get("history_hour", None)
-        if isinstance(qp_hour, list):
-            qp_hour = qp_hour[0] if qp_hour else None
-        if qp_hour is not None:
-            st.session_state.history_hour_offset = max(0, min(23, int(qp_hour)))
-            st.session_state.history_slider_pos = 23 - st.session_state.history_hour_offset
-    except Exception:
-        pass
-
     st.markdown("""
         <style>
             :root { --xwind-teal:#12d6cb; --xwind-teal-soft:rgba(18,214,203,0.18); --xwind-teal-mid:rgba(18,214,203,0.42); }
